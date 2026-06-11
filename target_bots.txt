@@ -1,0 +1,7 @@
+# ============ DANH SÁCH BOT ĐÍCH ============
+# Mỗi dòng 1 bot sẽ nhận kèo chốt + báo cáo (@username hoặc ID số).
+# Dòng bắt đầu bằng # là ghi chú, bị bỏ qua. Thêm/bớt bot chỉ cần sửa file này.
+# LƯU Ý: phải bấm /start với TỪNG bot trước khi chạy tool!
+
+@xitrumm2bot
+@Ckvietnam_bot

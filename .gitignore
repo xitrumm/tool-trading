@@ -1,0 +1,16 @@
+# Telethon session — BÍ MẬT: ai có file này là đăng nhập được tài khoản Telegram
+*.session
+*.session-journal
+
+# Cấu hình chứa API_ID/API_HASH thật — BÍ MẬT
+config.txt
+
+# Database & file tạm của bot
+trading_memory.db
+temp_data.xlsx
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

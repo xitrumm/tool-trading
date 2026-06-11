@@ -1,0 +1,7 @@
+telethon
+apscheduler
+pytz
+pandas
+numpy
+requests
+openpyxl
