@@ -1,6 +1,8 @@
 import sqlite3
 import re
 import datetime
+import json
+import time
 import requests
 import pandas as pd
 import numpy as np
@@ -10,6 +12,24 @@ import asyncio
 from telethon import TelegramClient, events
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
+
+# --- Khối ML (SHADOW MODE) ---
+# ml_features chỉ cần pandas/numpy (đã có sẵn) — luôn import được.
+# ml_predict/ml_radar có thể cần sklearn/joblib — thiếu thì bot vẫn chạy Y HỆT bản cũ.
+import ml_features
+try:
+    import ml_predict
+    HAS_ML_PREDICT = True
+except Exception:
+    HAS_ML_PREDICT = False
+try:
+    import ml_radar
+    HAS_ML_RADAR = True
+except Exception:
+    HAS_ML_RADAR = False
+
+# True = cảnh báo radar cũng broadcast tới bot đích; mặc định chỉ gửi Saved Messages
+RADAR_NOTIFY_TARGETS = False
 
 VN_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # mọi mốc thời gian của tool tính theo giờ Việt Nam
 
@@ -81,6 +101,9 @@ class BinanceRadar:
         self.base_url = "https://api.binance.com/api/v3"
         self.fapi_url = "https://fapi.binance.com/fapi/v1"
         self.data_url = "https://fapi.binance.com/futures/data"
+        # Cache frame BTC/ETH của lần check_market_weather gần nhất — feature ML dùng lại, 0 call thêm
+        self.last_btc_df = None
+        self.last_eth_df = None
 
     def get_klines(self, symbol, interval, limit=100):
         url = f"{self.base_url}/klines?symbol={symbol}&interval={interval}&limit={limit}"
@@ -116,23 +139,17 @@ class BinanceRadar:
     def build_trade_plan(self, df_4h, ema25_4h):
         """Tính Entry / Stoploss / TP1 / TP2 từ khung 4H.
         SL đặt dưới hỗ trợ (swing low 20 nến hoặc EMA25 4H) trừ đệm 0.5 ATR,
-        chặn tối đa -8% so với entry. TP theo R:R 1.5 và 3.0."""
-        entry = df_4h['close'].iloc[-1]
-        atr = self.calculate_atr(df_4h)
-        swing_low = df_4h['low'].iloc[-20:].min()
-        sl = min(swing_low, ema25_4h) - 0.5 * atr
-        if sl <= 0 or (entry - sl) / entry > 0.08:
-            sl = entry - 2 * atr
-        if sl >= entry:  # ATR bất thường (coin mới list, dữ liệu lỗi)
-            sl = entry * 0.95
-        risk = entry - sl
-        return {'entry': entry, 'sl': sl, 'tp1': entry + 1.5 * risk, 'tp2': entry + 3 * risk}
+        chặn tối đa -8% so với entry. TP theo R:R 1.5 và 3.0.
+        Công thức nằm trong ml_features (dùng chung với backfill ML để
+        train/serve không lệch nhau) — hành vi Y HỆT bản cũ."""
+        return ml_features.build_trade_plan(df_4h, ema25_4h)
 
     def check_market_weather(self):
         """Kiểm tra cả 2 anh cả: BTC và ETH"""
         try:
             btc_df = self.get_klines("BTCUSDT", "1d", 30)
             eth_df = self.get_klines("ETHUSDT", "1d", 30)
+            self.last_btc_df, self.last_eth_df = btc_df, eth_df  # cache cho feature ML
 
             btc_ema25, btc_price = self.calculate_ema(btc_df, 25), btc_df['close'].iloc[-1]
             eth_ema25, eth_price = self.calculate_ema(eth_df, 25), eth_df['close'].iloc[-1]
@@ -184,6 +201,7 @@ class BinanceRadar:
                 'pass_ema': (df_4h['close'].iloc[-1] > ema25_4h and price_1d > ema25_1d)
             }
             tech_data.update(self.build_trade_plan(df_4h, ema25_4h))
+            tech_data['_df_4h'], tech_data['_df_1d'] = df_4h, df_1d  # frame thô cho feature ML (không refetch)
             return tech_data
         except: return None
 
@@ -202,6 +220,9 @@ def init_db():
     for col in ('score REAL', 'entry REAL', 'stoploss REAL', 'tp1 REAL', 'tp2 REAL'):
         try: c.execute(f'ALTER TABLE signals ADD COLUMN {col}')
         except sqlite3.OperationalError: pass
+    # Bảng ML (shadow mode): mẫu kèo chờ chấm kết quả + cảnh báo radar
+    for stmt in ml_features.ML_DDL:
+        c.execute(stmt)
     conn.commit()
     conn.close()
 
@@ -433,8 +454,38 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             insert_db('signals', (now, coin, stats_info, sig_type, score, tech['entry'], tech['sl'], tech['tp1'], tech['tp2']),
                       columns=('date', 'coin', 'timeframe', 'type', 'score', 'entry', 'stoploss', 'tp1', 'tp2'))
 
+            # --- BƯỚC 3.5: ML SHADOW MODE (chỉ quan sát — KHÔNG can thiệp kèo) ---
+            # Log đủ feature + dự đoán để sau này so ML với kết quả thật.
+            # Lỗi ở đây tuyệt đối không được chặn việc phát kèo → bọc try/except.
+            ml_line = ""
+            try:
+                features = ml_features.build_price_features(
+                    tech['_df_4h'], tech['_df_1d'],
+                    btc_df_1d=radar.last_btc_df, eth_df_1d=radar.last_eth_df,
+                    trade_plan=tech)
+                # Extras chỉ live mới có (backfill không tái lập được) — nhiên liệu cho model v2
+                features.update({
+                    'ls_ratio_top': ls_ratio, 'funding_rate_pct': fr, 'open_interest': oi,
+                    'mention_count_today': total_mentions,
+                    'is_urgent_source': int(force_urgent), 'is_vip_rule': int(is_vip),
+                    'rule_score_full': float(score),
+                })
+                ml_prob, ml_version = (ml_predict.predict_signal_prob(features)
+                                       if HAS_ML_PREDICT else (None, None))
+                insert_db('ml_samples',
+                          (now, coin, 'live', ml_features.dumps_features(features),
+                           tech['entry'], tech['sl'], tech['tp1'], tech['tp2'],
+                           float(score), ml_prob, ml_version),
+                          columns=('ts', 'coin', 'source', 'features_json', 'entry', 'sl',
+                                   'tp1', 'tp2', 'rule_score', 'ml_prob', 'model_version'))
+                if ml_prob is not None:
+                    ml_line = f"\n🤖 ML: {ml_prob * 100:.0f}% khả năng chạm TP1 trước SL"
+                    print(f"   🤖 [ML Shadow] {coin}: {ml_prob * 100:.0f}% (model {ml_version})")
+            except Exception as e:
+                print(f"   ⚠️ Khối ML shadow lỗi (bỏ qua, kèo vẫn phát bình thường): {e}")
+
             msg = (f"{label}\n"
-                   f"💯 Điểm đáng giá: {score}/100 (hạng {rank} hôm nay)\n"
+                   f"💯 Điểm đáng giá: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
                    f"{format_trade_plan(tech)}\n"
                    f"{stats_info}\n"
                    f"Thị trường: {weather} | OI: {oi:,.0f}")
@@ -529,6 +580,12 @@ async def command_handler(event):
                 await event.reply(f"☁️ Đã backup Database vào: {dest}")
             else:
                 await event.reply("⚠️ Backup chưa chạy được (DB chưa tồn tại hoặc lỗi ghi — xem log console)")
+        elif text == '/ml':
+            await event.reply(build_ml_status())
+        elif text == '/radar':
+            await event.reply("📡 Đang quét radar coin bất thường (~1 phút, bot vẫn nghe tin bình thường)...")
+            result = await radar_scan_job(notify=False)
+            await event.reply(result)
         elif text == '/test':
             await event.reply("🧪 Đang tự kiểm tra: Binance + Database + kênh gửi bot đích...")
             results = []
@@ -562,6 +619,154 @@ async def command_handler(event):
             results.append(f"\n📡 Nguồn đang nghe: {SOURCE_BOT}")
             await event.reply("🧪 **KẾT QUẢ TỰ KIỂM TRA:**\n" + "\n".join(results))
     except Exception as e: pass
+
+# ==========================================
+# 5.5. KHỐI ML SHADOW (gán nhãn kết quả + radar coin lạ + báo cáo /ml)
+# ==========================================
+def _label_worker(rows):
+    """Worker ĐỒNG BỘ (chạy trong thread riêng qua asyncio.to_thread):
+    fetch nến 4H sau thời điểm vào kèo rồi chấm TP1-trước-hay-SL-trước.
+    rows: list (id, ts, coin, entry, sl, tp1, tp2). Trả list (id, label|None, expired)."""
+    out = []
+    now_utc_ms = int(datetime.datetime.now(pytz.UTC).timestamp() * 1000)
+    expire_ms = ml_features.LABEL_HORIZON_CANDLES * 4 * 3600 * 1000 + 7 * 86400000
+    for row_id, ts, coin, entry, sl, tp1, tp2 in rows:
+        try:
+            start_ms = ml_features.vn_str_to_utc_ms(ts)
+            res = requests.get(
+                f"https://api.binance.com/api/v3/klines?symbol={coin}USDT&interval=4h"
+                f"&startTime={start_ms}&limit={ml_features.LABEL_HORIZON_CANDLES + 6}", timeout=15).json()
+            candles = ml_features.klines_to_df(res) if isinstance(res, list) and res else None
+            if candles is not None:
+                # Chỉ chấm trên nến ĐÃ ĐÓNG — nến đang chạy còn quét thêm râu, chấm sớm dễ sai
+                candles = candles[candles['close_time'] < now_utc_ms]
+            if candles is None or len(candles) == 0:
+                # Không có dữ liệu (coin delist?) — quá hạn thì khoanh vùng bỏ, không retry mãi
+                out.append((row_id, None, (now_utc_ms - start_ms) > expire_ms))
+            else:
+                label = ml_features.walk_label(candles, entry, sl, tp1, tp2)
+                if label:
+                    label['resolved_at'] = ml_features.utc_ms_to_vn_str(
+                        int(candles['close_time'].iloc[label['resolved_idx']]))
+                out.append((row_id, label, False))
+        except Exception as e:
+            print(f"   ⚠️ Label {coin}: {e}")
+            out.append((row_id, None, False))
+        time.sleep(0.2)  # giãn request tránh rate limit
+    return out
+
+async def label_pending_samples_job():
+    """Chấm kết quả các kèo live đang chờ trong ml_samples — chạy 6h/lần theo lịch"""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        cutoff = (datetime.datetime.now(VN_TZ) - datetime.timedelta(hours=4)).strftime("%Y-%m-%d %H:%M:%S")
+        rows = conn.execute(
+            "SELECT id, ts, coin, entry, sl, tp1, tp2 FROM ml_samples "
+            "WHERE outcome IS NULL AND outcome_detail IS NULL AND source='live' AND ts <= ? "
+            "ORDER BY ts LIMIT 100", (cutoff,)).fetchall()
+        conn.close()
+        if rows:
+            results = await asyncio.to_thread(_label_worker, rows)
+            conn = sqlite3.connect('trading_memory.db')
+            now_str = datetime.datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+            resolved = 0
+            for row_id, label, expired in results:
+                if label:
+                    conn.execute(
+                        "UPDATE ml_samples SET outcome=?, outcome_detail=?, realized_r=?, resolved_at=? WHERE id=?",
+                        (label['outcome'], label['detail'], label['realized_r'], label['resolved_at'], row_id))
+                    resolved += 1
+                elif expired:
+                    conn.execute("UPDATE ml_samples SET outcome_detail='EXPIRED_NO_DATA', resolved_at=? WHERE id=?",
+                                 (now_str, row_id))
+            conn.commit()
+            conn.close()
+            if resolved:
+                print(f"\n🏷️ ML labeler: chấm xong {resolved}/{len(rows)} kèo chờ kết quả.")
+        set_state('last_label_run', datetime.datetime.now(VN_TZ).isoformat())
+    except Exception as e:
+        print(f"⚠️ Lỗi job gán nhãn ML: {e}")
+
+async def radar_scan_job(notify=True):
+    """Quét radar coin bất thường (4h/lần theo lịch, hoặc gõ /radar).
+    Coin lạ chỉ được TÍNH 1 LƯỢT NHẮC (RAW_RADAR) — không bao giờ tự chốt kèo một mình.
+    Trả chuỗi tóm tắt để lệnh /radar in ra."""
+    if not HAS_ML_RADAR:
+        return "⚠️ Radar chưa sẵn sàng (thiếu module ml_radar)."
+    try:
+        now_vn = datetime.datetime.now(VN_TZ)
+        now_str = now_vn.strftime("%Y-%m-%d %H:%M:%S")
+        alerts = await asyncio.to_thread(ml_radar.scan_anomalies)  # ~1 phút, chạy thread riêng không nghẽn bot
+        set_state('last_radar_scan', now_vn.isoformat())
+
+        # Dedupe: coin đã cảnh báo trong 24h thì không báo lại
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        cutoff = (now_vn - datetime.timedelta(hours=24)).strftime("%Y-%m-%d %H:%M:%S")
+        new_alerts = [a for a in alerts if conn.execute(
+            "SELECT COUNT(*) FROM anomaly_alerts WHERE coin=? AND ts > ?",
+            (a['coin'], cutoff)).fetchone()[0] == 0]
+        conn.close()
+
+        if not new_alerts:
+            return (f"📡 Radar quét xong: {len(alerts)} mã flag nhưng đều đã cảnh báo trong 24h."
+                    if alerts else "📡 Radar quét xong: thị trường không có gì lạ.")
+
+        for a in new_alerts:
+            insert_db('anomaly_alerts', (now_str, a['coin'], a['anomaly_score'], json.dumps(a['features'])),
+                      columns=('ts', 'coin', 'anomaly_score', 'features_json'))
+            insert_db('signals', (now_str, a['coin'], 'radar', 'RAW_RADAR'),
+                      columns=('date', 'coin', 'timeframe', 'type'))
+
+        msg = ml_radar.format_alert_message(new_alerts)
+        print(f"\n[{now_str}] 📡 RADAR: {len(new_alerts)} coin bất thường mới: "
+              + ", ".join(a['coin'] for a in new_alerts))
+        if notify:
+            await client.send_message('me', msg)
+            if RADAR_NOTIFY_TARGETS:
+                await broadcast_to_bots(msg)
+        # Cho từng coin đi qua đúng pipeline gác cổng (KHÔNG force_urgent —
+        # cần nguồn khác nhắc cùng ngày mới đủ 2 lượt để kích hoạt phân tích sâu)
+        for a in new_alerts:
+            await check_and_evaluate(a['coin'], now_str)
+        return msg
+    except Exception as e:
+        print(f"⚠️ Lỗi radar scan: {e}")
+        return f"⚠️ Radar lỗi: {e}"
+
+def build_ml_status():
+    """Tổng hợp trạng thái ML cho lệnh /ml"""
+    lines = ["🤖 **TRẠNG THÁI ML (SHADOW MODE)**"]
+    info = ml_predict.get_model_info() if HAS_ML_PREDICT else None
+    if info:
+        m = info.get('metrics', {})
+        lines.append(f"📦 Model: {info['version']} | train {info.get('n_train')} mẫu"
+                     f" | AUC {m.get('walk_forward_auc')} (rule baseline {m.get('rule_baseline_auc')})")
+    else:
+        lines.append("📦 Model: CHƯA CÓ — đang thu thập dữ liệu."
+                     " Chạy backfill_dataset.py + train_model.py rồi restart bot.")
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        for src in ('live', 'backfill'):
+            total, labeled, wins = conn.execute(
+                "SELECT COUNT(*), COUNT(outcome), COALESCE(SUM(outcome),0) FROM ml_samples WHERE source=?",
+                (src,)).fetchone()
+            if total:
+                wr = f" | win {100 * wins / labeled:.0f}%" if labeled else ""
+                lines.append(f"🗃️ Mẫu {src}: {total}, đã có kết quả {labeled}{wr}")
+        pending = conn.execute("SELECT COUNT(*) FROM ml_samples WHERE outcome IS NULL"
+                               " AND outcome_detail IS NULL AND source='live'").fetchone()[0]
+        n_alerts = conn.execute("SELECT COUNT(*) FROM anomaly_alerts").fetchone()[0]
+        conn.close()
+        lines.append(f"⏳ Kèo live chờ chấm kết quả: {pending}")
+        lines.append(f"📡 Radar đã cảnh báo: {n_alerts} lượt")
+    except Exception as e:
+        lines.append(f"⚠️ Lỗi đọc DB: {e}")
+    lines.append(f"🏷️ Label job gần nhất: {get_state('last_label_run') or 'chưa chạy'}")
+    lines.append(f"📡 Radar quét gần nhất: {get_state('last_radar_scan') or 'chưa chạy'}")
+    return "\n".join(lines)
 
 # ==========================================
 # 6. BÁO THỨC & KHỞI CHẠY
@@ -633,10 +838,19 @@ async def main():
     scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
     scheduler.add_job(backup_to_drive, 'cron', hour=11, minute=55)
     scheduler.add_job(backup_to_drive, 'cron', hour=23, minute=55)
+    # Job ML: chấm kết quả kèo 6h/lần; radar quét ngay sau mỗi nến 4H đóng (giờ VN)
+    scheduler.add_job(label_pending_samples_job, 'cron', hour='1,7,13,19', minute=20)
+    scheduler.add_job(radar_scan_job, 'cron', hour='3,7,11,15,19,23', minute=10)
     scheduler.start()
 
     print("🚀 SIÊU MEGAZORD V6 ĐÃ LÊN NÒNG! VẮT KIỆT TÀI NGUYÊN BINANCE API TỚI GIỌT CUỐI CÙNG.")
     print(f"   📡 Nguồn vào: {SOURCE_BOT} | 📤 Bot đích ({len(TARGET_BOTS)}): {', '.join(str(b) for b in TARGET_BOTS)}")
+    ml_info = ml_predict.get_model_info() if HAS_ML_PREDICT else None
+    if ml_info:
+        print(f"   🤖 ML shadow: model {ml_info['version']}"
+              f" (AUC {ml_info.get('metrics', {}).get('walk_forward_auc')}) — chấm xác suất song song, không can thiệp kèo")
+    else:
+        print("   🤖 ML shadow: chưa có model — chế độ THU THẬP DỮ LIỆU (kèo vẫn được log feature + chấm kết quả)")
     backup_to_drive()
     await catch_up_source_messages()   # đọc bù tin nhắn bị lỡ trong lúc tool tắt
     await catch_up_missed_report()     # lỡ mốc báo cáo 07:00/16:00 thì gửi bù ngay (đã gồm kèo vừa đọc bù)

@@ -15,6 +15,7 @@ File này cung cấp ngữ cảnh cho Claude Code (claude.ai/code) khi làm vi�
 7. **Phát kèo real-time**: kèo chốt (VIP/Thường) broadcast NGAY tới tất cả bot đích trong `TARGET_BOTS`, kèm điểm + hạng + Entry/Stoploss/TP1/TP2.
 8. **Báo cáo & backup tự động**: báo cáo gửi vào Saved Messages + tất cả bot đích 2 lần/ngày, backup DB lên Google Drive 2 lần/ngày.
 9. **Chống mất dữ liệu khi tool tắt**: lúc khởi động tự đọc bù tin nhắn bị lỡ của bot nguồn và gửi bù báo cáo nếu offline qua mốc 07:00/16:00 (trạng thái lưu trong bảng `bot_state`).
+10. **ML shadow mode** (xem mục "Khối ML"): model ML chấm xác suất kèo chạm TP1 trước SL hiển thị SONG SONG với điểm rule (không can thiệp quyết định); radar IsolationForest tự quét coin có volume/giá bất thường làm nguồn tín hiệu thứ 2; mọi kèo phát ra được tự động chấm kết quả thắng/thua để tích lũy dữ liệu huấn luyện.
 
 ```
 SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → TARGET_BOTS (n bot đích) + Saved Messages
@@ -27,13 +28,13 @@ SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → TARGET_BOTS (n bot 
 - Cấu hình KHÔNG nằm trong code mà đọc từ 2 file ngoài (cùng thư mục với `bottrading.py`):
   - `config.txt` — `API_ID`, `API_HASH` (lấy từ https://my.telegram.org) và `SOURCE_BOT` (bot nguồn), dạng `KEY=VALUE`. **Chứa secret thật → đã gitignore.**
   - `target_bots.txt` — danh sách bot đích, mỗi dòng 1 bot (@username hoặc ID số), dòng `#` là comment.
-- Cả 2 file đang chứa giá trị **placeholder** — phải điền giá trị thật trước khi chạy. Thiếu file / thiếu giá trị → bot in lỗi tiếng Việt rõ ràng và thoát ngay lúc khởi động (`SystemExit` trong `load_config` / `load_target_bots`).
+- Trên máy hiện tại cả 2 file **đã điền giá trị thật** (đã chạy thật, có `megazord_session.session` + `trading_memory.db`). Khi setup máy mới: phải tự điền — thiếu file / thiếu giá trị → bot in lỗi tiếng Việt rõ ràng và thoát ngay lúc khởi động (`SystemExit` trong `load_config` / `load_target_bots`).
 - Nơi backup DB chọn tự động qua `get_backup_dir()`: ưu tiên `G:\My Drive\Trading_Bot` (Google Drive for desktop mount ổ G:), nếu ổ G: chưa mount thì fallback sang `Desktop\Trading_Bot` (có xử lý cả trường hợp Desktop bị OneDrive chuyển hướng).
 
 ## Cài đặt & Chạy
 
 ```powershell
-# 1. Cài dependencies (Python 3.8+)
+# 1. Cài dependencies (Python 3.9+ — scikit-learn yêu cầu; bot core không ML chạy được 3.8)
 pip install -r requirements.txt
 
 # 2. Mở config.txt — điền API_ID, API_HASH thật (my.telegram.org → API development tools)
@@ -56,6 +57,7 @@ Bot chạy đến khi mất kết nối / Ctrl+C (`run_until_disconnected`). Khi
 2. **Gõ `/stats` trong Saved Messages**: tool trả lời ngay (kể cả khi chưa có dữ liệu) → chứng tỏ đang nghe và gửi được.
 3. **Gõ `/test`**: tự kiểm tra 3 đường — Binance Spot/Futures, SQLite, gửi thử tới TỪNG bot đích (báo ✅/❌ từng mục). Mở chat từng bot đích xác nhận có tin 🧪.
 4. **Test luồng thật**: làm bot nguồn gửi tin dạng Watchlist (được đánh giá NGAY, không cần đủ 2 lần nhắc) → console in `🚨 KÍCH HOẠT MẮT THẦN V6` + bot đích nhận kèo nếu pass kỹ thuật. Lưu ý: tin phải do CHÍNH bot nguồn gửi đến — tự gõ vào chat đó không kích hoạt (filter `incoming=True`).
+5. **Kiểm tra khối ML**: console lúc khởi động phải in dòng `🤖 ML shadow: ...` (có model → version + AUC; chưa có → "chế độ THU THẬP DỮ LIỆU"). Gõ `/ml` xem số mẫu; gõ `/radar` quét tay 1 lượt (~1 phút, trả về coin lạ hoặc "không có gì lạ"; gõ lần 2 ngay sau đó phải báo "đã cảnh báo trong 24h" → dedupe chạy đúng; gõ `/stats` GIỮA lúc quét phải được trả lời ngay → event loop không nghẽn).
 
 ## Cách sử dụng chi tiết
 
@@ -68,6 +70,8 @@ Gõ vào bất kỳ chat nào từ tài khoản của bạn (tiện nhất là *
 | `/stats` | Trả về báo cáo dòng tiền tổng hợp trong ngày (top ngành hút tiền, 🏆 top 1-2 kèo đáng giá nhất kèm Entry/SL/TP, các kèo Hoa Hậu khác xếp theo điểm giảm dần, kèo rác đã chặn) |
 | `/backup` | Copy `trading_memory.db` lên Google Drive ngay (ổ G: chưa mount → lưu `Desktop\Trading_Bot`); trả lời kèm đường dẫn đã lưu |
 | `/test` | Tự kiểm tra: Binance Spot/Futures, SQLite, gửi tin thử tới TỪNG bot đích — trả về ✅/❌ từng mục |
+| `/ml` | Trạng thái ML: version model + AUC, số mẫu live/backfill, win rate thực tế, số kèo chờ chấm kết quả, lần chạy job gần nhất |
+| `/radar` | Quét radar coin bất thường NGAY (thay vì chờ lịch 4h) — trả về danh sách coin lạ hoặc "không có gì lạ" |
 
 ### Định dạng tin nhắn bot nhận diện (CHỈ đọc từ `SOURCE_BOT`)
 
@@ -150,6 +154,37 @@ TOP PICK có header 🏆🏆🏆 nổi bật. (Kèo XIT_KY_THUAT chỉ ghi DB, K
 
 Hạng (`get_today_rank`) so điểm với MAX điểm của từng coin KHÁC đã chốt hôm nay (lỗi DB trả hạng 99 để không tự nhận TOP PICK bừa). Kèo gửi sớm trong ngày không bị rút highlight nếu sau đó có kèo điểm cao hơn — nhưng báo cáo định kỳ và `/stats` luôn xếp hạng lại toàn cục.
 
+### Khối ML (Shadow Mode) — thêm từ 06/2026
+
+**Nguyên tắc**: ML chỉ QUAN SÁT, không can thiệp — kèo vẫn lọc/chấm/xếp hạng bằng rule như cũ; model chỉ thêm dòng `🤖 ML: xx% khả năng chạm TP1 trước SL` vào tin kèo. Bot chạy được Y HỆT bản cũ nếu thiếu model/sklearn (mọi import + khối ML đều guard).
+
+**File**: `ml_features.py` (nguồn chân lý: 28 feature giá/volume, trade plan, gán nhãn `walk_label`, DDL — dùng chung live & backfill để không lệch train/serve), `ml_predict.py` (load `models/signal_model.pkl`, thiếu → trả None), `ml_radar.py` (IsolationForest quét cross-section ~150 coin, guard cứng volume ≥3× + giá 24h dương), `backfill_dataset.py` (CLI tạo dataset lịch sử), `train_model.py` (CLI train purged walk-forward + calibrate).
+
+**Vòng đời dữ liệu**: mỗi kèo chốt → ghi 1 dòng `ml_samples` (source='live', đủ 28 feature + extras phái sinh/mention) → job 6h/lần chấm kết quả (TP1 trước SL trước, horizon 14 ngày, nến mơ hồ tính thua) → đủ ≥300 mẫu live thì train lại model v2 (`--source backfill,live`).
+
+**📌 TRẠNG THÁI HIỆN TẠI (12/06/2026)**: dataset backfill **900 ngày (8.009 mẫu / 150 coin, win rate 38.8%) ĐÃ nằm sẵn trong `trading_memory.db`** — không cần chạy lại backfill trừ khi đổi công thức. Model v1 đã train 2 lần (540 → 900 ngày) nhưng **RỚT ngưỡng ship** (AUC walk-forward 0.541 < 0.56, dù đã hơn rule baseline 0.499 và calibration đơn điệu đạt) → **CHƯA có `models/signal_model.pkl`**, tin kèo CHƯA có dòng 🤖. Pipeline đã kiểm chứng sạch bằng shuffle-test (phá nhãn → AUC sập về ~0.5). Bot đang ở **chế độ thu thập dữ liệu**: mọi kèo chốt được log feature + tự chấm thắng/thua chờ train v2.
+
+**Hướng dẫn sử dụng hằng ngày**:
+
+| Việc | Cách làm |
+|---|---|
+| Chạy bot | `python bottrading.py` như cũ — console in `🤖 ML shadow: chưa có model — chế độ THU THẬP DỮ LIỆU` là đúng trạng thái |
+| Xem ML đang tích lũy gì | Gõ `/ml` ở Saved Messages: số mẫu live/backfill, win rate thực tế, kèo chờ chấm, lần chạy job |
+| Quét coin lạ ngay | Gõ `/radar` (radar vẫn chạy tự động 4h/lần dù chưa có model — không phụ thuộc model chấm điểm) |
+| Bật cảnh báo radar tới bot đích | Sửa `RADAR_NOTIFY_TARGETS = True` đầu file `bottrading.py` (mặc định chỉ gửi Saved Messages) |
+
+**Quy trình train v2 (khi đủ điều kiện)** — điều kiện: `/ml` báo **≥ 300 mẫu live đã có kết quả** (ước tính vài tháng chạy bot):
+```powershell
+python train_model.py --source backfill,live   # train trộn lịch sử + kèo thật
+# Ngưỡng ship: AUC >= 0.56 VÀ hơn rule baseline +0.02 VÀ calibration đơn điệu.
+# ĐẠT → tự ghi models/signal_model.pkl → restart bot → tin kèo có dòng "🤖 ML: xx% khả năng chạm TP1 trước SL"
+# RỚT → script exit lỗi, KHÔNG ghi model. --force chỉ dành cho thử nghiệm pipeline, ĐỪNG dùng cho chạy thật.
+```
+
+**Radar**: chạy 4h/lần (03:10, 07:10, ... giờ VN — ngay sau nến 4H đóng), coin lạ được cảnh báo vào Saved Messages (broadcast bot đích tắt mặc định — hằng số `RADAR_NOTIFY_TARGETS`), ghi 1 dòng `signals` type `RAW_RADAR` = **tính 1 lượt nhắc** rồi đi qua đúng pipeline gác cổng KHÔNG force_urgent → radar đơn độc không bao giờ tự chốt kèo, cần nguồn khác nhắc cùng ngày mới đủ ngưỡng 2 lượt. Dedupe 24h/coin qua bảng `anomaly_alerts`. Đã test thật 12/06/2026: bắt được UTK (volume ×23, +16%), HMSTR (+50%, volume ×8.5).
+
+**Lưu ý khi sửa**: model v1 CHỈ train trên 28 feature giá/volume (Binance không giữ lịch sử L/S, OI quá ~30 ngày nên backfill không tái lập được feature phái sinh — chúng vẫn được log ở live làm nhiên liệu cho v2). KHÔNG thêm feature lịch (giờ/thứ) — backfill bước theo daily close còn live nổ bất kỳ lúc nào, feature lịch sẽ leak nguồn gốc mẫu. **Đổi công thức feature/nhãn trong `ml_features.py` thì PHẢI xóa mẫu backfill cũ rồi chạy lại** (`DELETE FROM ml_samples WHERE source='backfill'` — vì backfill dùng INSERT OR IGNORE theo khóa (source, coin, ts) nên chạy lại KHÔNG tự đè dòng cũ), sau đó train lại. Khi đánh giá model, KHÔNG BAO GIỜ dùng shuffle split — nhãn nhìn 14 ngày tương lai, chỉ dùng purged walk-forward có sẵn trong `train_model.py`.
+
 ### Lịch tự động (timezone Asia/Ho_Chi_Minh, APScheduler)
 
 | Giờ | Việc |
@@ -158,6 +193,8 @@ Hạng (`get_today_rank`) so điểm với MAX điểm của từng coin KHÁC �
 | 16:00 | Gửi báo cáo chiều vào Saved Messages + tất cả bot đích |
 | 11:55 | Backup DB (Google Drive, fallback Desktop) |
 | 23:55 | Backup DB (Google Drive, fallback Desktop) |
+| 01:20, 07:20, 13:20, 19:20 | Job ML: chấm kết quả (TP/SL) các kèo live đang chờ trong `ml_samples` |
+| 03:10, 07:10, 11:10, 15:10, 19:10, 23:10 | Radar ML quét coin bất thường (chạy trong thread riêng, không nghẽn bot) |
 
 ### Đọc bù & gửi bù khi khởi động (chống mất dữ liệu lúc tool tắt)
 
@@ -174,10 +211,16 @@ Mỗi lần khởi động, TRƯỚC khi vào vòng lặp chính, tool chạy 2 
 signals    (date TEXT, coin TEXT, timeframe TEXT, type TEXT,
             score REAL, entry REAL, stoploss REAL, tp1 REAL, tp2 REAL)
 money_flow (date TEXT, sector_from TEXT, sector_to TEXT)
-bot_state  (key TEXT PRIMARY KEY, value TEXT)   -- trạng thái: last_msg_id, last_report_sent
+bot_state  (key TEXT PRIMARY KEY, value TEXT)   -- last_msg_id, last_report_sent, last_label_run, last_radar_scan
+-- Bảng ML (DDL nằm trong ml_features.ML_DDL, init_db chạy tự động):
+ml_samples (id PK, ts, coin, source 'live'|'backfill', features_json, entry, sl, tp1, tp2,
+            rule_score, ml_prob, model_version,
+            outcome 1|0|NULL, outcome_detail 'TP1'|'TP2'|'SL'|'AMBIGUOUS_SL'|'TIMEOUT'|'EXPIRED_NO_DATA',
+            realized_r, resolved_at)            -- unique(source, coin, ts) → backfill idempotent
+anomaly_alerts (id PK, ts, coin, anomaly_score, features_json)  -- radar, dedupe 24h/coin
 ```
 
-Bảng `bot_state` (đọc/ghi qua `get_state`/`set_state`) hiện có 2 key: `last_msg_id` (ID tin nhắn cuối của bot nguồn đã xử lý — mốc đọc bù) và `last_report_sent` (ISO datetime lần gửi báo cáo định kỳ cuối — mốc gửi bù).
+Bảng `bot_state` (đọc/ghi qua `get_state`/`set_state`) hiện có 4 key: `last_msg_id` (ID tin nhắn cuối của bot nguồn đã xử lý — mốc đọc bù), `last_report_sent` (ISO datetime lần gửi báo cáo định kỳ cuối — mốc gửi bù), `last_label_run` và `last_radar_scan` (ISO datetime lần chạy job ML gần nhất — hiển thị trong `/ml`).
 
 5 cột cuối của `signals` chỉ có giá trị với kèo chốt (`BUY_HOA_HAU%`); tín hiệu thô để NULL. DB cũ tự migrate bằng `ALTER TABLE` trong `init_db` (lỗi "duplicate column" được nuốt). `insert_db` nhận tham số `columns` để insert đúng cột — mọi insert vào `signals` PHẢI truyền `columns`.
 
@@ -191,18 +234,20 @@ Các giá trị `type` trong bảng `signals`:
 | `BUY_HOA_HAU` | Pass kỹ thuật EMA 4H/1D (cột `timeframe` chứa chuỗi stats: RSI, L/S, FR) |
 | `BUY_HOA_HAU_VIP` | Pass kỹ thuật + đủ bonus vĩ mô |
 | `XIT_KY_THUAT` | Bị loại vì cấu trúc giá yếu (dưới EMA25) |
+| `RAW_RADAR` | Coin do radar ML phát hiện bất thường (tính 1 lượt nhắc, không tự chốt kèo) |
 
 Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (lọc `date LIKE 'YYYY-MM-DD%'`).
 
-## Kiến trúc file (6 khối, theo comment trong code)
+## Kiến trúc file (7 khối, theo comment trong code; khối ML nằm ở 5 file `ml_*.py` / `backfill_dataset.py` / `train_model.py` riêng)
 
 | Khối | Thành phần | Vai trò |
 |---|---|---|
 | 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc `target_bots.txt`), `_parse_entity`, `client`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT/TARGET_BOTS từ file ngoài, khởi tạo Telethon session `megazord_session`, định tuyến nguồn vào/đầu ra |
 | 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H |
-| 3. Lưu trữ | `init_db` (kèm migrate), `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (3 bảng) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
+| 3. Lưu trữ | `init_db` (kèm migrate + DDL ML), `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (5 bảng: signals, money_flow, bot_state, ml_samples, anomaly_alerts) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
 | 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, 🏆 top 1-2 kèo điểm cao nhất (kèm Entry/SL/TP), các kèo Hoa Hậu khác xếp theo điểm, kèo rác trong ngày |
 | 5. Gác cổng | `fmt_price`, `compute_score`, `get_today_rank`, `format_trade_plan`, `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 3 bước (kỹ thuật → vĩ mô/phái sinh → chấm điểm & xếp hạng) + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test` |
+| 5.5. ML Shadow | `_label_worker`, `label_pending_samples_job`, `radar_scan_job`, `build_ml_status` (+ module ngoài: `ml_features`, `ml_predict`, `ml_radar`) | Chấm kết quả kèo live, radar coin lạ, lệnh `/ml` `/radar`; khối dự đoán nằm trong `check_and_evaluate` BƯỚC 3.5 |
 | 6. Khởi chạy | `catch_up_source_messages`, `_last_due_report_time`, `catch_up_missed_report`, `auto_send_report`, `main` | Đọc bù tin lỡ + gửi bù báo cáo lúc khởi động, APScheduler cron jobs, vòng lặp chính |
 
 ## Lưu ý kỹ thuật khi sửa code
@@ -219,4 +264,5 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 - `numpy` được import nhưng không dùng trực tiếp (pandas cần nó ngầm).
 - Coin symbol tự động ghép `USDT` khi gọi Binance (`{coin}USDT`) — chỉ hỗ trợ cặp USDT.
 - File config đọc bằng `encoding='utf-8-sig'` để chấp nhận cả file lưu từ Notepad (UTF-8 có BOM). ID số trong config tự chuyển sang `int` qua `_parse_entity` (Telethon yêu cầu ID là số nguyên).
-- Không commit: `config.txt` (chứa API_HASH thật), `megazord_session.session`, `trading_memory.db`, `temp_data.xlsx` — `.gitignore` đã chặn sẵn các file này.
+- Không commit: `config.txt` (chứa API_HASH thật), `megazord_session.session`, `trading_memory.db`, `temp_data.xlsx`, `models/` + `*.pkl` (model ML — tạo lại được bằng train_model.py) — `.gitignore` đã chặn sẵn các file này.
+- **Job ML chạy nặng phải qua `asyncio.to_thread`**: radar quét ~150 request/lượt và labeler fetch nến theo lô — cả 2 đã chạy trong thread riêng để không nghẽn event loop Telegram (khác với `check_and_evaluate` cũ vẫn block — xem mục Blocking ở trên). Code ML mới nên giữ nguyên pattern này.

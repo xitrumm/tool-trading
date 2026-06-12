@@ -5,3 +5,6 @@ pandas
 numpy
 requests
 openpyxl
+# ML (model chấm xác suất kèo + radar IsolationForest) — bot core vẫn chạy nếu thiếu
+scikit-learn>=1.4
+joblib
