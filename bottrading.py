@@ -395,9 +395,8 @@ def get_today_rank(coin, score, today):
 def format_trade_plan(tech):
     """Khối Entry/SL/TP kèm % so với entry để dán vào tin nhắn"""
     entry, sl, tp1, tp2 = tech['entry'], tech['sl'], tech['tp1'], tech['tp2']
-    return (f"📥 Entry: {fmt_price(entry)}\n"
-            f"🛑 Stoploss: {fmt_price(sl)} ({(sl/entry - 1)*100:.1f}%)\n"
-            f"🎯 TP1: {fmt_price(tp1)} (+{(tp1/entry - 1)*100:.1f}%) | TP2: {fmt_price(tp2)} (+{(tp2/entry - 1)*100:.1f}%)")
+    return (f"📥 Entry: {fmt_price(entry)} - SL: {fmt_price(sl)} ({(sl/entry - 1)*100:.1f}%) - "
+            f"TP1: {fmt_price(tp1)} (+{(tp1/entry - 1)*100:.1f}%) | TP2: {fmt_price(tp2)} (+{(tp2/entry - 1)*100:.1f}%)")
 
 async def check_and_evaluate(coin, now, force_urgent=False, source=""):
     try:
@@ -447,7 +446,10 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             is_top = (rank == 1) or (rank == 2 and score >= 70)
 
             sig_type = "BUY_HOA_HAU_VIP" if is_vip else "BUY_HOA_HAU"
-            label = f"🌟 KÈO VIP: {coin}" if is_vip else f"✅ KÈO THƯỜNG: {coin}"
+            if is_top:
+                label = f"{'🌟' if is_vip else '✅'} KÈO HOA HẬU: {coin}"
+            else:
+                label = f"🌟 KÈO VIP: {coin}" if is_vip else f"✅ KÈO THƯỜNG: {coin}"
             print(f"   {'🌟 CHỐT KÈO VIP' if is_vip else '✅ CHỐT KÈO THƯỜNG'} {coin} | 💯 Điểm: {score}/100 (hạng {rank} hôm nay)"
                   + (" | 🏆 TOP PICK" if is_top else ""))
 
@@ -484,13 +486,11 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             except Exception as e:
                 print(f"   ⚠️ Khối ML shadow lỗi (bỏ qua, kèo vẫn phát bình thường): {e}")
 
-            msg = (f"{label}\n"
-                   f"💯 Điểm đáng giá: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
+            msg = (f"{label} - Điểm: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
                    f"{format_trade_plan(tech)}\n"
-                   f"{stats_info}\n"
-                   f"Thị trường: {weather} | OI: {oi:,.0f}")
+                   f"{stats_info}")
             if is_top:
-                msg = f"🏆🏆🏆 TOP PICK — KÈO ĐÁNG GIÁ NHẤT HÔM NAY 🏆🏆🏆\n{msg}"
+                msg = f"🏆🏆🏆 TOP PICK 🏆🏆🏆\n{msg}"
             await broadcast_to_bots(msg)
 
     except Exception as e: print("Lỗi soi chéo:", e)

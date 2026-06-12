@@ -1,0 +1,647 @@
+import sqlite3
+import re
+import datetime
+import requests
+import pandas as pd
+import numpy as np
+import os
+import shutil
+from telethon import TelegramClient, events
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
+
+# ==========================================
+# 1. CẤU HÌNH BỘ NÃO
+# ==========================================
+API_ID = 1234567         # Nhập dãy số ID từ my.telegram.org 
+API_HASH = 'abc...'      # Nhập chuỗi Hash (Giữ trong nháy đơn '')
+
+client = TelegramClient('megazord_session', API_ID, API_HASH)
+
+# ==========================================
+# 2. KHỐI VỆ TINH BINANCE (QUANT ENGINE V6)
+# ==========================================
+class BinanceRadar:
+    def __init__(self):
+        self.base_url = "https://api.binance.com/api/v3"
+        self.fapi_url = "https://fapi.binance.com/fapi/v1"
+        self.data_url = "https://fapi.binance.com/futures/data"
+
+    def get_klines(self, symbol, interval, limit=100):
+        url = f"{self.base_url}/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        res = requests.get(url).json()
+        df = pd.DataFrame(res, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'tbbav', 'tbqav', 'ignore'])
+        df['close'] = df['close'].astype(float)
+        return df
+
+    def calculate_ema(self, df, period):
+        return df['close'].ewm(span=period, adjust=False).mean().iloc[-1]
+
+    def calculate_rsi(self, df, periods=14):
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(alpha=1/periods, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/periods, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1]
+
+    def check_market_weather(self):
+        """Kiểm tra cả 2 anh cả: BTC và ETH"""
+        try:
+            btc_df = self.get_klines("BTCUSDT", "1d", 30)
+            eth_df = self.get_klines("ETHUSDT", "1d", 30)
+            
+            btc_ema25, btc_price = self.calculate_ema(btc_df, 25), btc_df['close'].iloc[-1]
+            eth_ema25, eth_price = self.calculate_ema(eth_df, 25), eth_df['close'].iloc[-1]
+            
+            if btc_price > btc_ema25 and eth_price > eth_ema25:
+                return "NẮNG ĐẸP (BTC+ETH Đều Xanh)"
+            elif btc_price < btc_ema25 and eth_price < eth_ema25:
+                return "BÃO TỐ (BTC+ETH Đều Gãy)"
+            else:
+                return "BIẾN ĐỘNG (1 Xanh 1 Đỏ)"
+        except: return "LỖI KẾT NỐI"
+
+    def spy_on_derivatives(self, symbol):
+        """Quét 3 thông số Phái sinh: L/S Ratio, Funding Rate, Open Interest"""
+        try:
+            # L/S Ratio
+            url_ls = f"{self.data_url}/topLongShortAccountRatio?symbol={symbol}&period=1d&limit=1"
+            ls_ratio = float(requests.get(url_ls).json()[0]['longShortRatio'])
+            
+            # Funding Rate (Nhân 100 để ra % luôn cho dễ nhìn)
+            url_fr = f"{self.fapi_url}/premiumIndex?symbol={symbol}"
+            funding_rate = float(requests.get(url_fr).json()['lastFundingRate']) * 100
+            
+            # Open Interest (OI)
+            url_oi = f"{self.fapi_url}/openInterest?symbol={symbol}"
+            oi = float(requests.get(url_oi).json()['openInterest'])
+            
+            return ls_ratio, funding_rate, oi
+        except: return 1.0, 0.0, 0.0
+
+    def analyze_coin(self, symbol):
+        """Phân tích Full Technical: EMA (7, 25, 99) và RSI"""
+        try:
+            df_4h = self.get_klines(symbol, "4h", 100)
+            df_1d = self.get_klines(symbol, "1d", 100)
+            
+            # Tính toán bộ thông số
+            price_1d = df_1d['close'].iloc[-1]
+            ema25_4h = self.calculate_ema(df_4h, 25)
+            ema25_1d = self.calculate_ema(df_1d, 25)
+            ema7_1d = self.calculate_ema(df_1d, 7)
+            ema99_1d = self.calculate_ema(df_1d, 99)
+            rsi_1d = self.calculate_rsi(df_1d)
+            
+            # Gói data gửi về để in log
+            tech_data = {
+                'price': price_1d, 'ema7': ema7_1d, 'ema25': ema25_1d, 
+                'ema99': ema99_1d, 'rsi': rsi_1d, 
+                'pass_ema': (df_4h['close'].iloc[-1] > ema25_4h and price_1d > ema25_1d)
+            }
+            return tech_data
+        except: return None
+
+radar = BinanceRadar()
+
+# ==========================================
+# 3. KHỐI LƯU TRỮ & ĐỒNG BỘ CLOUD (GIỮ NGUYÊN)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect('trading_memory.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS signals (date TEXT, coin TEXT, timeframe TEXT, type TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS money_flow (date TEXT, sector_from TEXT, sector_to TEXT)''')
+    conn.commit()
+    conn.close()
+
+def insert_db(table, data):
+    try:
+        init_db() 
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        placeholders = ', '.join(['?'] * len(data))
+        c.execute(f'INSERT INTO {table} VALUES ({placeholders})', data)
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+def backup_to_drive():
+    try:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        backup_dir = r"G:\My Drive\Trading_Bot"
+        if not os.path.exists(backup_dir): os.makedirs(backup_dir)
+        if os.path.exists('trading_memory.db'):
+            shutil.copy('trading_memory.db', os.path.join(backup_dir, 'trading_memory.db'))
+            print(f"\n[{now_str}] ☁️ AUTO-BACKUP: Đã đồng bộ Database lên Google Drive an toàn!")
+    except Exception as e: print(f"\nLỗi đồng bộ Google Drive: {e}")
+
+# ==========================================
+# 4. KHỐI BÁO CÁO (ANALYTICS)
+# ==========================================
+def generate_report(is_auto=False):
+    init_db() 
+    conn = sqlite3.connect('trading_memory.db')
+    prefix = "⏰ **BẢN TIN ĐIỂM TÂM VIP (V6)**" if is_auto else "📊 **BÁO CÁO TRỰC TIẾP (V6)**"
+    report = f"{prefix}\n\n"
+    now_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    try:
+        df_flow = pd.read_sql_query(f"SELECT sector_to FROM money_flow WHERE date LIKE '{now_date}%'", conn)
+        if not df_flow.empty:
+            top_sectors = df_flow['sector_to'].value_counts().head(3).to_dict()
+            report += f"**🔥 TOP NGÀNH HÚT TIỀN (HÔM NAY):**\n"
+            for s, c in top_sectors.items(): report += f"  • {s}: {c} lần bơm\n"
+        else: report += "**🔥 TOP NGÀNH HÚT TIỀN:** ⏳ Chưa có dòng tiền mới hôm nay.\n"
+
+        df_signals = pd.read_sql_query(f"SELECT coin, timeframe, type FROM signals WHERE type LIKE 'BUY_HOA_HAU%' AND date LIKE '{now_date}%'", conn)
+        if not df_signals.empty:
+            report += f"\n**🎯 KÈO HOA HẬU (PASS EMA 4H/1D):**\n"
+            coin_counts = df_signals['coin'].value_counts().to_dict()
+            
+            for c, count in coin_counts.items():
+                latest_stat = df_signals[df_signals['coin'] == c].iloc[-1]
+                stats_str = latest_stat['timeframe'] 
+                
+                if latest_stat['type'] == 'BUY_HOA_HAU_VIP':
+                    report += f"  🌟 **{c}**: Báo {count} lần ({stats_str})\n"
+                else:
+                    report += f"  ✅ {c}: Báo {count} lần ({stats_str})\n"
+        else: report += "\n**🎯 KÈO HOA HẬU:** ⏳ Chưa có mã nào vượt EMA25.\n"
+        
+        df_xit = pd.read_sql_query(f"SELECT type, COUNT(*) as cnt FROM signals WHERE type LIKE 'XIT_%' AND date LIKE '{now_date}%' GROUP BY type", conn)
+        if not df_xit.empty:
+            report += f"\n**🛡️ ĐÃ CHẶN KÈO RÁC (HÔM NAY):**\n"
+            for _, row in df_xit.iterrows(): report += f"  • {row['type']}: {row['cnt']} lệnh\n"
+    except Exception as e: report += f"Lỗi xuất báo cáo: {e}"
+    conn.close()
+    return report
+
+# ==========================================
+# 5. NGƯỜI GÁC CỔNG V6 (FULL OPTION BINANCE)
+# ==========================================
+def check_and_evaluate(coin, now, force_urgent=False, source=""):
+    try:
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        today = now[:10] 
+        c.execute("SELECT COUNT(*) FROM signals WHERE coin=? AND date LIKE ?", (coin, f"{today}%"))
+        sig_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM money_flow WHERE sector_to=? AND date LIKE ?", (coin, f"{today}%"))
+        flow_count = c.fetchone()[0]
+        total_mentions = sig_count + flow_count
+        conn.close()
+
+        if total_mentions >= 2 or force_urgent:
+            reason = source if force_urgent else f"GOM ĐƯỢC {total_mentions} TÍN HIỆU NGẮN HẠN"
+            print(f"\n[{now}] 🚨 KÍCH HOẠT MẮT THẦN V6: {coin} ({reason})")
+            
+            # --- BƯỚC 1: SOI KỸ THUẬT TOÀN DIỆN ---
+            tech = radar.analyze_coin(f"{coin}USDT")
+            if not tech: return
+            
+            # In Log siêu chi tiết như 1 Quant Trader thực thụ
+            print(f"   📊 [Kỹ thuật] Giá: {tech['price']:.4f} | EMA(7/25/99): ({tech['ema7']:.4f} / {tech['ema25']:.4f} / {tech['ema99']:.4f}) | RSI: {tech['rsi']:.2f}")
+
+            if not tech['pass_ema']:
+                print(f"   ❌ Loại {coin}: Cấu trúc giá yếu (Dưới EMA25 4H/1D)")
+                insert_db('signals', (now, coin, "4h_1d_check", "XIT_KY_THUAT"))
+                return
+                
+            # --- BƯỚC 2: QUÉT BENCHMARK & PHÁI SINH ---
+            weather = radar.check_market_weather()
+            ls_ratio, fr, oi = radar.spy_on_derivatives(f"{coin}USDT")
+            
+            print(f"   🌊 [Dòng chảy] TT: {weather} | L/S: {ls_ratio:.2f} | Funding: {fr:.4f}% | OI: {oi:,.0f}")
+            
+            # Đóng gói chuỗi báo cáo để gửi vào Tele
+            stats_info = f"RSI: {tech['rsi']:.0f} | L/S: {ls_ratio:.2f} | FR: {fr:.4f}%"
+            
+            # Logic VIP Khắc nghiệt: Mọi thứ phải hoàn hảo (Ko dính FOMO RSI > 75)
+            is_vip = ("NẮNG ĐẸP" in weather) and (ls_ratio > 1.0) and (tech['rsi'] < 75)
+            
+            if is_vip:
+                print(f"   🌟 CHỐT KÈO VIP {coin}! Đủ bộ Thiên thời - Địa lợi - Nhân hòa.")
+                insert_db('signals', (now, coin, stats_info, "BUY_HOA_HAU_VIP"))
+            else:
+                print(f"   ✅ CHỐT KÈO THƯỜNG {coin}. (Pass Kỹ thuật nhưng thiếu Bonus vĩ mô)")
+                insert_db('signals', (now, coin, stats_info, "BUY_HOA_HAU"))
+            
+    except Exception as e: print("Lỗi soi chéo:", e)
+
+@client.on(events.NewMessage()) 
+async def main_handler(event):
+    try:
+        sender = await event.get_sender()
+        text = event.raw_text
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if event.message.media and hasattr(event.message.media, 'document'):
+            doc = event.message.media.document
+            mime_type = doc.mime_type
+            if 'spreadsheetml' in mime_type or 'excel' in mime_type or 'csv' in mime_type:
+                file_path = await event.download_media(file='temp_data.xlsx')
+                try:
+                    df = pd.read_excel(file_path) if 'excel' in mime_type or 'spreadsheetml' in mime_type else pd.read_csv(file_path)
+                    df.columns = [str(c).strip().upper() for c in df.columns]
+                    score_col = next((c for c in df.columns if 'PRIORITY' in c or 'SCORE' in c), None)
+                    coin_col = next((c for c in df.columns if 'SYMBOL' in c or 'COIN' in c), None)
+                    if score_col and coin_col:
+                        df[score_col] = pd.to_numeric(df[score_col], errors='coerce')
+                        top_coins = df[df[score_col] > 70] 
+                        if not top_coins.empty:
+                            for _, row in top_coins.iterrows():
+                                raw_coin = str(row[coin_col]).upper().replace('/USDT', '').strip()
+                                insert_db('signals', (now, raw_coin, "excel", "RAW_EXCEL"))
+                                check_and_evaluate(raw_coin, now, force_urgent=True, source=f"EXCEL_SCORE_{row[score_col]}")
+                except Exception as e: pass
+                finally:
+                    if os.path.exists(file_path): os.remove(file_path) 
+                return 
+
+        if not text: return
+
+        if getattr(sender, 'is_self', False) and text.strip().lower() == '/stats':
+            await event.reply("⚙️ Đang lên báo cáo dòng tiền tổng hợp V6...")
+            await event.reply(generate_report())
+            return 
+            
+        if getattr(sender, 'is_self', False) and text.strip().lower() == '/backup':
+            backup_to_drive()
+            await event.reply("☁️ Đã đồng bộ Database lên Google Drive thủ công!")
+            return
+
+        if "Watchlist" in text and "Mới thêm" in text:
+            urgent_coins = re.findall(r'•\s*(.*?)\s*[—\-]', text)
+            for coin in urgent_coins:
+                coin = coin.strip().upper()
+                insert_db('signals', (now, coin, "watchlist", "RAW_URGENT"))
+                check_and_evaluate(coin, now, force_urgent=True, source="WATCHLIST ĐỘT BIẾN") 
+
+        flow_match = re.search(r'([A-Z0-9]+)\s*→\s*([A-Z0-9]+)', text)
+        if flow_match:
+            coin_from = flow_match.group(1).upper()
+            coin_to = flow_match.group(2).upper()
+            insert_db('money_flow', (now, coin_from, coin_to))
+            check_and_evaluate(coin_to, now) 
+
+        sig_match = re.search(r'symbol:\s*([A-Z0-9]+)/USDT\s*\|\s*direction:\s*(BUY|SELL)\s*\|\s*timeframe:\s*([0-9a-z]+)', text, re.IGNORECASE)
+        if sig_match:
+            coin = sig_match.group(1).upper()
+            direction = sig_match.group(2).upper()
+            timeframe = sig_match.group(3).lower()
+            if direction == 'BUY':
+                insert_db('signals', (now, coin, timeframe, "RAW_SIGNAL"))
+                check_and_evaluate(coin, now) 
+
+    except Exception as e: pass
+
+# ==========================================
+# 6. BÁO THỨC & KHỞI CHẠY 
+# ==========================================
+async def auto_send_report():
+    await client.send_message('me', generate_report(is_auto=True))
+
+async def main():
+    tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(auto_send_report, 'cron', hour=7, minute=0)
+    scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
+    scheduler.add_job(backup_to_drive, 'cron', hour=11, minute=55)
+    scheduler.add_job(backup_to_drive, 'cron', hour=23, minute=55)
+    scheduler.start()
+    
+    print("🚀 SIÊU MEGAZORD V6 ĐÃ LÊN NÒNG! VẮT KIỆT TÀI NGUYÊN BINANCE API TỚI GIỌT CUỐI CÙNG.")
+    backup_to_drive()
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    init_db()
+    client.start()
+    client.loop.run_until_complete(main())import sqlite3
+import re
+import datetime
+import requests
+import pandas as pd
+import numpy as np
+import os
+import shutil
+from telethon import TelegramClient, events
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+import pytz
+
+# ==========================================
+# 1. CẤU HÌNH BỘ NÃO
+# ==========================================
+API_ID = 1234567         # Nhập dãy số ID từ my.telegram.org 
+API_HASH = 'abc...'      # Nhập chuỗi Hash (Giữ trong nháy đơn '')
+
+client = TelegramClient('megazord_session', API_ID, API_HASH)
+
+# ==========================================
+# 2. KHỐI VỆ TINH BINANCE (QUANT ENGINE V6)
+# ==========================================
+class BinanceRadar:
+    def __init__(self):
+        self.base_url = "https://api.binance.com/api/v3"
+        self.fapi_url = "https://fapi.binance.com/fapi/v1"
+        self.data_url = "https://fapi.binance.com/futures/data"
+
+    def get_klines(self, symbol, interval, limit=100):
+        url = f"{self.base_url}/klines?symbol={symbol}&interval={interval}&limit={limit}"
+        res = requests.get(url).json()
+        df = pd.DataFrame(res, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'tbbav', 'tbqav', 'ignore'])
+        df['close'] = df['close'].astype(float)
+        return df
+
+    def calculate_ema(self, df, period):
+        return df['close'].ewm(span=period, adjust=False).mean().iloc[-1]
+
+    def calculate_rsi(self, df, periods=14):
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(alpha=1/periods, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/periods, adjust=False).mean()
+        rs = avg_gain / avg_loss
+        rsi = 100 - (100 / (1 + rs))
+        return rsi.iloc[-1]
+
+    def check_market_weather(self):
+        """Kiểm tra cả 2 anh cả: BTC và ETH"""
+        try:
+            btc_df = self.get_klines("BTCUSDT", "1d", 30)
+            eth_df = self.get_klines("ETHUSDT", "1d", 30)
+            
+            btc_ema25, btc_price = self.calculate_ema(btc_df, 25), btc_df['close'].iloc[-1]
+            eth_ema25, eth_price = self.calculate_ema(eth_df, 25), eth_df['close'].iloc[-1]
+            
+            if btc_price > btc_ema25 and eth_price > eth_ema25:
+                return "NẮNG ĐẸP (BTC+ETH Đều Xanh)"
+            elif btc_price < btc_ema25 and eth_price < eth_ema25:
+                return "BÃO TỐ (BTC+ETH Đều Gãy)"
+            else:
+                return "BIẾN ĐỘNG (1 Xanh 1 Đỏ)"
+        except: return "LỖI KẾT NỐI"
+
+    def spy_on_derivatives(self, symbol):
+        """Quét 3 thông số Phái sinh: L/S Ratio, Funding Rate, Open Interest"""
+        try:
+            # L/S Ratio
+            url_ls = f"{self.data_url}/topLongShortAccountRatio?symbol={symbol}&period=1d&limit=1"
+            ls_ratio = float(requests.get(url_ls).json()[0]['longShortRatio'])
+            
+            # Funding Rate (Nhân 100 để ra % luôn cho dễ nhìn)
+            url_fr = f"{self.fapi_url}/premiumIndex?symbol={symbol}"
+            funding_rate = float(requests.get(url_fr).json()['lastFundingRate']) * 100
+            
+            # Open Interest (OI)
+            url_oi = f"{self.fapi_url}/openInterest?symbol={symbol}"
+            oi = float(requests.get(url_oi).json()['openInterest'])
+            
+            return ls_ratio, funding_rate, oi
+        except: return 1.0, 0.0, 0.0
+
+    def analyze_coin(self, symbol):
+        """Phân tích Full Technical: EMA (7, 25, 99) và RSI"""
+        try:
+            df_4h = self.get_klines(symbol, "4h", 100)
+            df_1d = self.get_klines(symbol, "1d", 100)
+            
+            # Tính toán bộ thông số
+            price_1d = df_1d['close'].iloc[-1]
+            ema25_4h = self.calculate_ema(df_4h, 25)
+            ema25_1d = self.calculate_ema(df_1d, 25)
+            ema7_1d = self.calculate_ema(df_1d, 7)
+            ema99_1d = self.calculate_ema(df_1d, 99)
+            rsi_1d = self.calculate_rsi(df_1d)
+            
+            # Gói data gửi về để in log
+            tech_data = {
+                'price': price_1d, 'ema7': ema7_1d, 'ema25': ema25_1d, 
+                'ema99': ema99_1d, 'rsi': rsi_1d, 
+                'pass_ema': (df_4h['close'].iloc[-1] > ema25_4h and price_1d > ema25_1d)
+            }
+            return tech_data
+        except: return None
+
+radar = BinanceRadar()
+
+# ==========================================
+# 3. KHỐI LƯU TRỮ & ĐỒNG BỘ CLOUD (GIỮ NGUYÊN)
+# ==========================================
+def init_db():
+    conn = sqlite3.connect('trading_memory.db')
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS signals (date TEXT, coin TEXT, timeframe TEXT, type TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS money_flow (date TEXT, sector_from TEXT, sector_to TEXT)''')
+    conn.commit()
+    conn.close()
+
+def insert_db(table, data):
+    try:
+        init_db() 
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        placeholders = ', '.join(['?'] * len(data))
+        c.execute(f'INSERT INTO {table} VALUES ({placeholders})', data)
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+def backup_to_drive():
+    try:
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        backup_dir = r"G:\My Drive\Trading_Bot"
+        if not os.path.exists(backup_dir): os.makedirs(backup_dir)
+        if os.path.exists('trading_memory.db'):
+            shutil.copy('trading_memory.db', os.path.join(backup_dir, 'trading_memory.db'))
+            print(f"\n[{now_str}] ☁️ AUTO-BACKUP: Đã đồng bộ Database lên Google Drive an toàn!")
+    except Exception as e: print(f"\nLỗi đồng bộ Google Drive: {e}")
+
+# ==========================================
+# 4. KHỐI BÁO CÁO (ANALYTICS)
+# ==========================================
+def generate_report(is_auto=False):
+    init_db() 
+    conn = sqlite3.connect('trading_memory.db')
+    prefix = "⏰ **BẢN TIN ĐIỂM TÂM VIP (V6)**" if is_auto else "📊 **BÁO CÁO TRỰC TIẾP (V6)**"
+    report = f"{prefix}\n\n"
+    now_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    try:
+        df_flow = pd.read_sql_query(f"SELECT sector_to FROM money_flow WHERE date LIKE '{now_date}%'", conn)
+        if not df_flow.empty:
+            top_sectors = df_flow['sector_to'].value_counts().head(3).to_dict()
+            report += f"**🔥 TOP NGÀNH HÚT TIỀN (HÔM NAY):**\n"
+            for s, c in top_sectors.items(): report += f"  • {s}: {c} lần bơm\n"
+        else: report += "**🔥 TOP NGÀNH HÚT TIỀN:** ⏳ Chưa có dòng tiền mới hôm nay.\n"
+
+        df_signals = pd.read_sql_query(f"SELECT coin, timeframe, type FROM signals WHERE type LIKE 'BUY_HOA_HAU%' AND date LIKE '{now_date}%'", conn)
+        if not df_signals.empty:
+            report += f"\n**🎯 KÈO HOA HẬU (PASS EMA 4H/1D):**\n"
+            coin_counts = df_signals['coin'].value_counts().to_dict()
+            
+            for c, count in coin_counts.items():
+                latest_stat = df_signals[df_signals['coin'] == c].iloc[-1]
+                stats_str = latest_stat['timeframe'] 
+                
+                if latest_stat['type'] == 'BUY_HOA_HAU_VIP':
+                    report += f"  🌟 **{c}**: Báo {count} lần ({stats_str})\n"
+                else:
+                    report += f"  ✅ {c}: Báo {count} lần ({stats_str})\n"
+        else: report += "\n**🎯 KÈO HOA HẬU:** ⏳ Chưa có mã nào vượt EMA25.\n"
+        
+        df_xit = pd.read_sql_query(f"SELECT type, COUNT(*) as cnt FROM signals WHERE type LIKE 'XIT_%' AND date LIKE '{now_date}%' GROUP BY type", conn)
+        if not df_xit.empty:
+            report += f"\n**🛡️ ĐÃ CHẶN KÈO RÁC (HÔM NAY):**\n"
+            for _, row in df_xit.iterrows(): report += f"  • {row['type']}: {row['cnt']} lệnh\n"
+    except Exception as e: report += f"Lỗi xuất báo cáo: {e}"
+    conn.close()
+    return report
+
+# ==========================================
+# 5. NGƯỜI GÁC CỔNG V6 (FULL OPTION BINANCE)
+# ==========================================
+def check_and_evaluate(coin, now, force_urgent=False, source=""):
+    try:
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        today = now[:10] 
+        c.execute("SELECT COUNT(*) FROM signals WHERE coin=? AND date LIKE ?", (coin, f"{today}%"))
+        sig_count = c.fetchone()[0]
+        c.execute("SELECT COUNT(*) FROM money_flow WHERE sector_to=? AND date LIKE ?", (coin, f"{today}%"))
+        flow_count = c.fetchone()[0]
+        total_mentions = sig_count + flow_count
+        conn.close()
+
+        if total_mentions >= 2 or force_urgent:
+            reason = source if force_urgent else f"GOM ĐƯỢC {total_mentions} TÍN HIỆU NGẮN HẠN"
+            print(f"\n[{now}] 🚨 KÍCH HOẠT MẮT THẦN V6: {coin} ({reason})")
+            
+            # --- BƯỚC 1: SOI KỸ THUẬT TOÀN DIỆN ---
+            tech = radar.analyze_coin(f"{coin}USDT")
+            if not tech: return
+            
+            # In Log siêu chi tiết như 1 Quant Trader thực thụ
+            print(f"   📊 [Kỹ thuật] Giá: {tech['price']:.4f} | EMA(7/25/99): ({tech['ema7']:.4f} / {tech['ema25']:.4f} / {tech['ema99']:.4f}) | RSI: {tech['rsi']:.2f}")
+
+            if not tech['pass_ema']:
+                print(f"   ❌ Loại {coin}: Cấu trúc giá yếu (Dưới EMA25 4H/1D)")
+                insert_db('signals', (now, coin, "4h_1d_check", "XIT_KY_THUAT"))
+                return
+                
+            # --- BƯỚC 2: QUÉT BENCHMARK & PHÁI SINH ---
+            weather = radar.check_market_weather()
+            ls_ratio, fr, oi = radar.spy_on_derivatives(f"{coin}USDT")
+            
+            print(f"   🌊 [Dòng chảy] TT: {weather} | L/S: {ls_ratio:.2f} | Funding: {fr:.4f}% | OI: {oi:,.0f}")
+            
+            # Đóng gói chuỗi báo cáo để gửi vào Tele
+            stats_info = f"RSI: {tech['rsi']:.0f} | L/S: {ls_ratio:.2f} | FR: {fr:.4f}%"
+            
+            # Logic VIP Khắc nghiệt: Mọi thứ phải hoàn hảo (Ko dính FOMO RSI > 75)
+            is_vip = ("NẮNG ĐẸP" in weather) and (ls_ratio > 1.0) and (tech['rsi'] < 75)
+            
+            if is_vip:
+                print(f"   🌟 CHỐT KÈO VIP {coin}! Đủ bộ Thiên thời - Địa lợi - Nhân hòa.")
+                insert_db('signals', (now, coin, stats_info, "BUY_HOA_HAU_VIP"))
+            else:
+                print(f"   ✅ CHỐT KÈO THƯỜNG {coin}. (Pass Kỹ thuật nhưng thiếu Bonus vĩ mô)")
+                insert_db('signals', (now, coin, stats_info, "BUY_HOA_HAU"))
+            
+    except Exception as e: print("Lỗi soi chéo:", e)
+
+@client.on(events.NewMessage()) 
+async def main_handler(event):
+    try:
+        sender = await event.get_sender()
+        text = event.raw_text
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        if event.message.media and hasattr(event.message.media, 'document'):
+            doc = event.message.media.document
+            mime_type = doc.mime_type
+            if 'spreadsheetml' in mime_type or 'excel' in mime_type or 'csv' in mime_type:
+                file_path = await event.download_media(file='temp_data.xlsx')
+                try:
+                    df = pd.read_excel(file_path) if 'excel' in mime_type or 'spreadsheetml' in mime_type else pd.read_csv(file_path)
+                    df.columns = [str(c).strip().upper() for c in df.columns]
+                    score_col = next((c for c in df.columns if 'PRIORITY' in c or 'SCORE' in c), None)
+                    coin_col = next((c for c in df.columns if 'SYMBOL' in c or 'COIN' in c), None)
+                    if score_col and coin_col:
+                        df[score_col] = pd.to_numeric(df[score_col], errors='coerce')
+                        top_coins = df[df[score_col] > 70] 
+                        if not top_coins.empty:
+                            for _, row in top_coins.iterrows():
+                                raw_coin = str(row[coin_col]).upper().replace('/USDT', '').strip()
+                                insert_db('signals', (now, raw_coin, "excel", "RAW_EXCEL"))
+                                check_and_evaluate(raw_coin, now, force_urgent=True, source=f"EXCEL_SCORE_{row[score_col]}")
+                except Exception as e: pass
+                finally:
+                    if os.path.exists(file_path): os.remove(file_path) 
+                return 
+
+        if not text: return
+
+        if getattr(sender, 'is_self', False) and text.strip().lower() == '/stats':
+            await event.reply("⚙️ Đang lên báo cáo dòng tiền tổng hợp V6...")
+            await event.reply(generate_report())
+            return 
+            
+        if getattr(sender, 'is_self', False) and text.strip().lower() == '/backup':
+            backup_to_drive()
+            await event.reply("☁️ Đã đồng bộ Database lên Google Drive thủ công!")
+            return
+
+        if "Watchlist" in text and "Mới thêm" in text:
+            urgent_coins = re.findall(r'•\s*(.*?)\s*[—\-]', text)
+            for coin in urgent_coins:
+                coin = coin.strip().upper()
+                insert_db('signals', (now, coin, "watchlist", "RAW_URGENT"))
+                check_and_evaluate(coin, now, force_urgent=True, source="WATCHLIST ĐỘT BIẾN") 
+
+        flow_match = re.search(r'([A-Z0-9]+)\s*→\s*([A-Z0-9]+)', text)
+        if flow_match:
+            coin_from = flow_match.group(1).upper()
+            coin_to = flow_match.group(2).upper()
+            insert_db('money_flow', (now, coin_from, coin_to))
+            check_and_evaluate(coin_to, now) 
+
+        sig_match = re.search(r'symbol:\s*([A-Z0-9]+)/USDT\s*\|\s*direction:\s*(BUY|SELL)\s*\|\s*timeframe:\s*([0-9a-z]+)', text, re.IGNORECASE)
+        if sig_match:
+            coin = sig_match.group(1).upper()
+            direction = sig_match.group(2).upper()
+            timeframe = sig_match.group(3).lower()
+            if direction == 'BUY':
+                insert_db('signals', (now, coin, timeframe, "RAW_SIGNAL"))
+                check_and_evaluate(coin, now) 
+
+    except Exception as e: pass
+
+# ==========================================
+# 6. BÁO THỨC & KHỞI CHẠY 
+# ==========================================
+async def auto_send_report():
+    await client.send_message('me', generate_report(is_auto=True))
+
+async def main():
+    tz = pytz.timezone('Asia/Ho_Chi_Minh')
+    scheduler = AsyncIOScheduler(timezone=tz)
+    scheduler.add_job(auto_send_report, 'cron', hour=7, minute=0)
+    scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
+    scheduler.add_job(backup_to_drive, 'cron', hour=11, minute=55)
+    scheduler.add_job(backup_to_drive, 'cron', hour=23, minute=55)
+    scheduler.start()
+    
+    print("🚀 SIÊU MEGAZORD V6 ĐÃ LÊN NÒNG! VẮT KIỆT TÀI NGUYÊN BINANCE API TỚI GIỌT CUỐI CÙNG.")
+    backup_to_drive()
+    await client.run_until_disconnected()
+
+if __name__ == '__main__':
+    init_db()
+    client.start()
+    client.loop.run_until_complete(main())
