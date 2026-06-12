@@ -11,11 +11,13 @@ File này cung cấp ngữ cảnh cho Claude Code (claude.ai/code) khi làm vi�
 3. **Gom & kích hoạt**: khi 1 coin được nhắc ≥ 2 lần trong ngày (hoặc nguồn khẩn cấp) → chạy phân tích sâu.
 4. **Đối chiếu Binance**: kỹ thuật (EMA 7/25/99, RSI), thời tiết thị trường (BTC+ETH), phái sinh (L/S Ratio, Funding Rate, Open Interest).
 5. **Phân hạng kèo**: VIP (🌟) / Thường (✅) / Loại — Xịt (❌), lưu vào SQLite.
-6. **Phát kèo real-time**: kèo chốt (VIP/Thường) được broadcast NGAY tới tất cả bot đích trong `TARGET_BOTS`.
-7. **Báo cáo & backup tự động**: báo cáo gửi vào Saved Messages + tất cả bot đích 2 lần/ngày, backup DB lên Google Drive 2 lần/ngày.
+6. **Chấm điểm & chọn TOP PICK**: mỗi kèo chốt được chấm 0-100 điểm, xếp hạng so với các kèo khác trong ngày; hạng 1 (hoặc hạng 2 điểm ≥ 70) gắn 🏆 TOP PICK.
+7. **Phát kèo real-time**: kèo chốt (VIP/Thường) broadcast NGAY tới tất cả bot đích trong `TARGET_BOTS`, kèm điểm + hạng + Entry/Stoploss/TP1/TP2.
+8. **Báo cáo & backup tự động**: báo cáo gửi vào Saved Messages + tất cả bot đích 2 lần/ngày, backup DB lên Google Drive 2 lần/ngày.
+9. **Chống mất dữ liệu khi tool tắt**: lúc khởi động tự đọc bù tin nhắn bị lỡ của bot nguồn và gửi bù báo cáo nếu offline qua mốc 07:00/16:00 (trạng thái lưu trong bảng `bot_state`).
 
 ```
-SOURCE_BOT (1 bot nguồn) → lọc 2 bước + Binance → TARGET_BOTS (n bot đích) + Saved Messages
+SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → TARGET_BOTS (n bot đích) + Saved Messages
 ```
 
 ## ⚠️ Trạng thái mã nguồn (QUAN TRỌNG)
@@ -57,7 +59,7 @@ Bot chạy đến khi mất kết nối / Ctrl+C (`run_until_disconnected`). Khi
 
 ## Cách sử dụng chi tiết
 
-### Lệnh điều khiển (chỉ nhận từ CHÍNH tài khoản đang chạy bot — `is_self`)
+### Lệnh điều khiển (chỉ nhận tin do CHÍNH tài khoản đang chạy bot gõ ra — filter `outgoing=True`)
 
 Gõ vào bất kỳ chat nào từ tài khoản của bạn (tiện nhất là **Saved Messages**):
 
@@ -130,6 +132,23 @@ TOP PICK có header 🏆🏆🏆 nổi bật. (Kèo XIT_KY_THUAT chỉ ghi DB, K
 - **Entry** = giá đóng nến 4H mới nhất (≈ giá hiện tại).
 - **Stoploss** = min(swing low 20 nến 4H, EMA25 4H) − 0.5×ATR(14); nếu xa hơn −8% so với entry thì thay bằng entry − 2×ATR; tuyệt đối không vượt −8% (fallback cuối: entry × 0.95).
 - **TP1 / TP2** = entry + 1.5×risk / entry + 3×risk (R:R cố định 1.5 và 3.0, risk = entry − SL).
+- Giá hiển thị qua `fmt_price`: ≥100 → 2 số lẻ, ≥1 → 4, ≥0.01 → 6, còn lại 8 số lẻ.
+
+### Trọng số chấm điểm (`compute_score` — nền 50, kẹp 0-100)
+
+| Yếu tố | Điểm |
+|---|---|
+| Kèo VIP (đủ bộ vĩ mô) | +10 |
+| Số lần nhắc trong DB hôm nay | +5 mỗi lần vượt mốc 2, tối đa +15 |
+| Nguồn khẩn cấp (Watchlist/Excel) | +5 |
+| RSI 1D trong vùng 45-65 / trên 75 | +10 / −10 |
+| L/S Ratio > 1.5 / > 1.0 / < 0.8 | +5 / +3 / −5 |
+| Funding âm / > 0.05% | +5 / −5 |
+| EMA xếp tầng (giá > EMA7 > EMA25 > EMA99, khung 1D) | +10 |
+| Thời tiết NẮNG ĐẸP / BÃO TỐ | +10 / −15 |
+| Giá vượt EMA25(1D) quá 15% (đu đỉnh) | −5 |
+
+Hạng (`get_today_rank`) so điểm với MAX điểm của từng coin KHÁC đã chốt hôm nay (lỗi DB trả hạng 99 để không tự nhận TOP PICK bừa). Kèo gửi sớm trong ngày không bị rút highlight nếu sau đó có kèo điểm cao hơn — nhưng báo cáo định kỳ và `/stats` luôn xếp hạng lại toàn cục.
 
 ### Lịch tự động (timezone Asia/Ho_Chi_Minh, APScheduler)
 
@@ -144,7 +163,7 @@ TOP PICK có header 🏆🏆🏆 nổi bật. (Kèo XIT_KY_THUAT chỉ ghi DB, K
 
 Mỗi lần khởi động, TRƯỚC khi vào vòng lặp chính, tool chạy 2 bước theo thứ tự:
 
-1. **`catch_up_source_messages()` — đọc bù tin nhắn**: lấy `last_msg_id` (ID tin cuối đã xử lý, lưu trong bảng `bot_state`) rồi kéo mọi tin bot nguồn gửi SAU mốc đó qua `iter_messages(min_id=..., reverse=True)`, xử lý từng tin bằng đúng pipeline thường (`process_source_message`). Tin đọc bù dùng **giờ gửi gốc của tin** (đổi sang giờ VN) nên đếm số lần nhắc vẫn đúng ngày. Giới hạn an toàn: tối đa 300 tin mới nhất (lỡ nhiều hơn thì bỏ phần cũ, có log). Lần chạy đầu tiên (chưa có mốc) chỉ ghi mốc, KHÔNG cày lại lịch sử.
+1. **`catch_up_source_messages()` — đọc bù tin nhắn**: lấy `last_msg_id` (ID tin cuối đã xử lý, lưu trong bảng `bot_state`) rồi kéo mọi tin bot nguồn gửi SAU mốc đó qua `iter_messages(min_id=..., reverse=True)`, lọc bỏ tin do mình gõ (`if not m.out`), xử lý từng tin bằng đúng pipeline thường (`process_source_message`). Tin đọc bù dùng **giờ gửi gốc của tin** (đổi sang giờ VN) nên đếm số lần nhắc vẫn đúng ngày. Giới hạn an toàn: tối đa 300 tin mới nhất (lỡ nhiều hơn thì bỏ phần cũ, có log). Lần chạy đầu tiên (chưa có mốc) chỉ ghi mốc, KHÔNG cày lại lịch sử.
 2. **`catch_up_missed_report()` — gửi bù báo cáo**: so `last_report_sent` (bảng `bot_state`) với mốc báo cáo 07:00/16:00 gần nhất đã qua (`_last_due_report_time`); nếu tool offline qua mốc đó → gửi ngay 1 báo cáo có header "⏰ BÁO CÁO GỬI BÙ" vào Saved Messages + mọi bot đích. Chạy SAU bước đọc bù nên báo cáo đã gồm các kèo vừa đọc bù.
 
 `last_msg_id` được cập nhật sau MỖI tin xử lý xong (khối `finally` của `process_source_message`); `last_report_sent` cập nhật sau mỗi lần `auto_send_report` chạy (kể cả theo lịch cron).
@@ -180,10 +199,10 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 | Khối | Thành phần | Vai trò |
 |---|---|---|
 | 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc `target_bots.txt`), `_parse_entity`, `client`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT/TARGET_BOTS từ file ngoài, khởi tạo Telethon session `megazord_session`, định tuyến nguồn vào/đầu ra |
-| 2. Quant Engine | class `BinanceRadar` | Gọi Binance API: klines, EMA, RSI, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) |
-| 3. Lưu trữ | `init_db`, `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (3 bảng) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
-| 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, kèo Hoa Hậu, kèo rác trong ngày |
-| 5. Gác cổng | `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 2 bước + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test` |
+| 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H |
+| 3. Lưu trữ | `init_db` (kèm migrate), `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (3 bảng) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
+| 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, 🏆 top 1-2 kèo điểm cao nhất (kèm Entry/SL/TP), các kèo Hoa Hậu khác xếp theo điểm, kèo rác trong ngày |
+| 5. Gác cổng | `fmt_price`, `compute_score`, `get_today_rank`, `format_trade_plan`, `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 3 bước (kỹ thuật → vĩ mô/phái sinh → chấm điểm & xếp hạng) + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test` |
 | 6. Khởi chạy | `catch_up_source_messages`, `_last_due_report_time`, `catch_up_missed_report`, `auto_send_report`, `main` | Đọc bù tin lỡ + gửi bù báo cáo lúc khởi động, APScheduler cron jobs, vòng lặp chính |
 
 ## Lưu ý kỹ thuật khi sửa code
