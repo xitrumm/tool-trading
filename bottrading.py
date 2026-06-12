@@ -144,6 +144,56 @@ class BinanceRadar:
         train/serve không lệch nhau) — hành vi Y HỆT bản cũ."""
         return ml_features.build_trade_plan(df_4h, ema25_4h)
 
+    def find_pivot_levels(self, df, left=3, right=3):
+        """Liệt kê các mốc swing high / swing low (pivot): nến cao/thấp nhất trong
+        cửa sổ left+right nến quanh nó. Pivot high = kháng cự, pivot low = hỗ trợ."""
+        pivot_highs, pivot_lows = [], []
+        highs, lows = df['high'], df['low']
+        for i in range(left, len(df) - right):
+            if highs.iloc[i] >= highs.iloc[i - left:i + right + 1].max():
+                pivot_highs.append(float(highs.iloc[i]))
+            if lows.iloc[i] <= lows.iloc[i - left:i + right + 1].min():
+                pivot_lows.append(float(lows.iloc[i]))
+        return pivot_highs, pivot_lows
+
+    def analyze_convergence(self, symbol):
+        """Soi nhanh khung 1H + 4H cho tin Capital Convergence (KHÔNG qua gác cổng EMA).
+        Trả dict: entry = giá đóng 1H mới nhất, TP1 = kháng cự 1H gần nhất phía trên,
+        TP2 = kháng cự 4H nằm trên TP1, SL = hỗ trợ 1H gần nhất phía dưới (kẹp -8%),
+        change_24h = % biến động giá 24h, in_bb = giá còn nằm trong dải Bollinger
+        MA99 (SMA99 ± 2σ) khung 1H hay không. Lỗi/thiếu dữ liệu → None."""
+        try:
+            df_1h = self.get_klines(symbol, "1h", 200)
+            df_4h = self.get_klines(symbol, "4h", 180)
+            entry = float(df_1h['close'].iloc[-1])
+
+            # Biến động 24h: so với close 24 nến 1H trước (coin mới list thì so nến đầu)
+            base = float(df_1h['close'].iloc[-25]) if len(df_1h) >= 25 else float(df_1h['close'].iloc[0])
+            change_24h = (entry / base - 1) * 100
+
+            ma99 = df_1h['close'].rolling(99).mean().iloc[-1]
+            std99 = df_1h['close'].rolling(99).std().iloc[-1]
+            in_bb = (not pd.isna(ma99)) and (not pd.isna(std99)) and \
+                    (ma99 - 2 * std99) <= entry <= (ma99 + 2 * std99)
+
+            res_1h, sup_1h = self.find_pivot_levels(df_1h)
+            res_4h, _ = self.find_pivot_levels(df_4h)
+            # TP1: kháng cự 1H gần nhất, tối thiểu +1% cho đáng vào lệnh (không có → +3%)
+            above_1h = [p for p in res_1h if p > entry * 1.01]
+            tp1 = min(above_1h) if above_1h else entry * 1.03
+            # TP2: kháng cự 4H gần nhất nằm TRÊN TP1 (không có → +6% hoặc nhỉnh hơn TP1)
+            above_4h = [p for p in res_4h if p > tp1 * 1.01]
+            tp2 = min(above_4h) if above_4h else max(entry * 1.06, tp1 * 1.02)
+            # SL: hỗ trợ 1H gần nhất, tối thiểu -1%; hỗ trợ xa hơn -8% thì lùi về -5%
+            below_1h = [p for p in sup_1h if p < entry * 0.99]
+            sl = max(below_1h) if below_1h else entry * 0.95
+            if sl < entry * 0.92: sl = entry * 0.95
+
+            return {'entry': entry, 'sl': sl, 'tp1': tp1, 'tp2': tp2,
+                    'change_24h': change_24h, 'in_bb': in_bb}
+        except Exception:
+            return None
+
     def check_market_weather(self):
         """Kiểm tra cả 2 anh cả: BTC và ETH"""
         try:
@@ -446,10 +496,11 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             is_top = (rank == 1) or (rank == 2 and score >= 70)
 
             sig_type = "BUY_HOA_HAU_VIP" if is_vip else "BUY_HOA_HAU"
-            if is_top:
-                label = f"{'🌟' if is_vip else '✅'} KÈO HOA HẬU: {coin}"
+            # Top pick được nâng nhãn lên KÈO VIP kể cả khi thiếu bonus vĩ mô
+            if is_vip or is_top:
+                label = f"{'🌟' if is_vip else '✅'} KÈO VIP: {coin}"
             else:
-                label = f"🌟 KÈO VIP: {coin}" if is_vip else f"✅ KÈO THƯỜNG: {coin}"
+                label = f"✅ KÈO THƯỜNG: {coin}"
             print(f"   {'🌟 CHỐT KÈO VIP' if is_vip else '✅ CHỐT KÈO THƯỜNG'} {coin} | 💯 Điểm: {score}/100 (hạng {rank} hôm nay)"
                   + (" | 🏆 TOP PICK" if is_top else ""))
 
@@ -495,6 +546,31 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
 
     except Exception as e: print("Lỗi soi chéo:", e)
 
+CONV_DEFAULT_DESC = "Nhiều nguồn vốn cùng chảy về 1 coin"
+
+async def convergence_alert(coin, desc, now):
+    """Cảnh báo NHANH cho tin Capital Convergence — bắn ngay khi đạt điều kiện,
+    KHÔNG qua gác cổng EMA và KHÔNG ghi bảng signals (tránh cộng lượt nhắc ảo —
+    luồng RAW_URGENT của Watchlist vẫn chạy song song như cũ).
+    Điều kiện bắn: |biến động 24h| < 10%  HOẶC  giá còn trong dải Bollinger MA99 1H."""
+    try:
+        print(f"\n[{now}] 👀 CAPITAL CONVERGENCE: {coin} — soi nhanh khung 1H/4H...")
+        plan = radar.analyze_convergence(f"{coin}USDT")
+        if not plan:
+            print(f"   ⚠️ {coin}: không lấy được dữ liệu Binance — bỏ qua cảnh báo nhanh.")
+            return
+        print(f"   📊 Biến động 24h: {plan['change_24h']:+.1f}% | Trong dải BB MA99 1H: {'CÓ' if plan['in_bb'] else 'KHÔNG'}")
+        if abs(plan['change_24h']) >= 10 and not plan['in_bb']:
+            print(f"   ❌ {coin}: đã chạy {plan['change_24h']:+.1f}% và thoát dải BB — KHÔNG cảnh báo.")
+            return
+        msg = (f"👀Capital Convergence\n"
+               f"✅{coin}: {desc or CONV_DEFAULT_DESC}\n"
+               f"{format_trade_plan(plan)}")
+        await broadcast_to_bots(msg)
+        print(f"   🚀 Đã bắn cảnh báo nhanh {coin} | {format_trade_plan(plan)}")
+    except Exception as e:
+        print(f"   ⚠️ Lỗi cảnh báo Capital Convergence {coin}: {e}")
+
 async def process_source_message(message):
     """Xử lý 1 tin nhắn từ bot nguồn — dùng chung cho tin real-time và tin đọc bù lúc khởi động.
     Mốc thời gian lấy theo giờ GỬI của tin (đổi sang giờ VN) để tin đọc bù vẫn đếm đúng ngày."""
@@ -527,6 +603,13 @@ async def process_source_message(message):
                 return
 
         if not text: return
+
+        # Tin Capital Convergence → cảnh báo NHANH (chạy TRƯỚC gác cổng để kịp "ngay lập tức")
+        if 'capital convergence' in text.lower():
+            for coin, desc in re.findall(
+                    r'•\s*([A-Za-z0-9]+)\s*[—\-–]\s*Capital\s+Convergence\s*:?\s*([^\n]*)',
+                    text, re.IGNORECASE):
+                await convergence_alert(coin.strip().upper(), desc.strip(), now)
 
         if "Watchlist" in text and "Mới thêm" in text:
             urgent_coins = re.findall(r'•\s*(.*?)\s*[—\-]', text)

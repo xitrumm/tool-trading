@@ -95,6 +95,17 @@ Watchlist Mới thêm:
 ```
 → Ghi `RAW_URGENT` và **đánh giá NGAY** (force_urgent, bỏ qua điều kiện ≥ 2 lần nhắc).
 
+**3b. Cảnh báo nhanh Capital Convergence** (tin chứa `Capital Convergence`, dòng dạng `• ENJ — Capital Convergence: <lý do>`): NGOÀI luồng RAW_URGENT ở trên, mỗi coin còn đi qua `convergence_alert` — chạy TRƯỚC gác cổng để cảnh báo ngay lập tức:
+- Soi ngay khung 1H + 4H (`BinanceRadar.analyze_convergence` — 2 call klines), KHÔNG qua gác cổng EMA và KHÔNG ghi bảng `signals` (tránh cộng lượt nhắc ảo).
+- Điều kiện bắn: |biến động giá 24h| < 10% **HOẶC** giá còn nằm trong dải Bollinger MA99 (SMA99 ± 2σ) khung 1H — coin đã pump quá thì im lặng (chỉ log console).
+- Entry = giá đóng 1H mới nhất; TP1 = kháng cự (pivot high cửa sổ 3-3) 1H gần nhất phía trên, tối thiểu +1% (không có → +3%); TP2 = kháng cự 4H nằm trên TP1 (không có → +6%); SL = hỗ trợ (pivot low) 1H gần nhất phía dưới, tối thiểu −1%, hỗ trợ xa hơn −8% thì lùi về −5%.
+- Format broadcast tới TARGET_BOTS:
+```
+👀Capital Convergence
+✅ENJ: Nhiều nguồn vốn cùng chảy về 1 coin
+📥 Entry: xx - SL: xx (-xx%) - TP1: xx (+xx%) | TP2: xx (+xx%)
+```
+
 **4. File Excel/CSV đính kèm**: cần có cột chứa chữ `SYMBOL` hoặc `COIN`, và cột chứa chữ `PRIORITY` hoặc `SCORE` (không phân biệt hoa thường). Mọi dòng có điểm **> 70** sẽ được ghi `RAW_EXCEL` và **đánh giá NGAY**. File tạm `temp_data.xlsx` tự xóa sau xử lý.
 
 ### Logic lọc kèo (Người Gác Cổng V6 — `check_and_evaluate`)
@@ -126,9 +137,25 @@ BƯỚC 3 — Chấm điểm & xếp hạng (`compute_score` + `get_today_rank`)
         Hạng 1 (hoặc hạng 2 với điểm ≥ 70) = 🏆 TOP PICK.
         │
         ▼
-Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY tới mọi bot trong TARGET_BOTS,
-tin nhắn kèm: 💯 điểm + hạng, 📥 Entry, 🛑 Stoploss, 🎯 TP1/TP2 (kèm %),
-TOP PICK có header 🏆🏆🏆 nổi bật. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
+Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY tới mọi bot trong TARGET_BOTS
+theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
+```
+
+**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng đầu):
+
+Kèo thường:
+```
+✅ KÈO THƯỜNG: XPL - Điểm: 60/100 (hạng 5 hôm nay)
+📥 Entry: 0.086100 - SL: 0.077194 (-10.3%) - TP1: 0.099459 (+15.5%) | TP2: 0.112818 (+31.0%)
+RSI: 53 | L/S: 0.75 | FR: 0.0050%
+```
+
+Top pick (thêm header 🏆):
+```
+🏆🏆🏆 TOP PICK 🏆🏆🏆
+✅ KÈO VIP: TRUMP - Điểm: 85/100 (hạng 1 hôm nay)
+📥 Entry: 2.1950 - SL: 2.0415 (-7.0%) - TP1: 2.4253 (+10.5%) | TP2: 2.6556 (+21.0%)
+RSI: 61 | L/S: 2.51 | FR: -0.1128%
 ```
 
 ### Entry / Stoploss / Take Profit (`BinanceRadar.build_trade_plan` — khung 4H)
@@ -243,7 +270,7 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 | Khối | Thành phần | Vai trò |
 |---|---|---|
 | 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc `target_bots.txt`), `_parse_entity`, `client`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT/TARGET_BOTS từ file ngoài, khởi tạo Telethon session `megazord_session`, định tuyến nguồn vào/đầu ra |
-| 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H |
+| 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `find_pivot_levels`, `analyze_convergence`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H + soi nhanh 1H/4H (pivot kháng cự/hỗ trợ, Bollinger MA99) cho cảnh báo Capital Convergence |
 | 3. Lưu trữ | `init_db` (kèm migrate + DDL ML), `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (5 bảng: signals, money_flow, bot_state, ml_samples, anomaly_alerts) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
 | 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, 🏆 top 1-2 kèo điểm cao nhất (kèm Entry/SL/TP), các kèo Hoa Hậu khác xếp theo điểm, kèo rác trong ngày |
 | 5. Gác cổng | `fmt_price`, `compute_score`, `get_today_rank`, `format_trade_plan`, `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 3 bước (kỹ thuật → vĩ mô/phái sinh → chấm điểm & xếp hạng) + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test` |
