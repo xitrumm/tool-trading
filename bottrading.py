@@ -67,31 +67,68 @@ def load_config():
     return cfg
 
 def load_target_bots():
-    """Đọc target_bots.txt — mỗi dòng 1 bot đích (@username hoặc ID số), hỗ trợ comment #"""
+    """Đọc target_bots.txt — mỗi dòng 1 TOKEN bot đích (dạng 123456789:ABC... từ BotFather),
+    hỗ trợ comment #. Token sai format bị bỏ qua (in cảnh báo, KHÔNG in token vì là secret)."""
     if not os.path.exists(TARGET_BOTS_FILE):
-        raise SystemExit(f"❌ Không tìm thấy {TARGET_BOTS_FILE} — tạo file, mỗi dòng 1 bot đích")
+        raise SystemExit(f"❌ Không tìm thấy {TARGET_BOTS_FILE} — tạo file, mỗi dòng 1 token bot đích (lấy từ @BotFather)")
+    tokens = []
     with open(TARGET_BOTS_FILE, 'r', encoding='utf-8-sig') as f:
-        bots = [_parse_entity(line) for line in f if line.strip() and not line.strip().startswith('#')]
-    if not bots:
-        raise SystemExit(f"❌ {TARGET_BOTS_FILE} đang rỗng — thêm ít nhất 1 bot đích (@username hoặc ID số)")
-    return bots
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            if re.match(r'^\d+:.+$', line):
+                tokens.append(line)
+            else:
+                print(f"   ⚠️ Bỏ qua 1 dòng trong {os.path.basename(TARGET_BOTS_FILE)}: sai format token (cần dạng 123456789:ABC...)")
+    if not tokens:
+        raise SystemExit(f"❌ {TARGET_BOTS_FILE} không có token hợp lệ — thêm ít nhất 1 token bot (dạng 123456789:ABC... từ @BotFather)")
+    return tokens
 
 _cfg = load_config()
 API_ID = int(_cfg['API_ID'])                    # Dãy số ID từ my.telegram.org
 API_HASH = _cfg['API_HASH']                     # Chuỗi Hash từ my.telegram.org
 SOURCE_BOT = _parse_entity(_cfg['SOURCE_BOT'])  # Bot nguồn: chỉ đọc tin nhắn từ bot này
-TARGET_BOTS = load_target_bots()                # Bot đích: nhận kèo chốt + báo cáo
+TARGET_BOT_TOKENS = load_target_bots()          # Token các bot đích: mỗi bot TỰ gửi report qua Bot API
+OWNER_ID = None                                 # chat_id chính chủ — gán lúc khởi động qua client.get_me()
 
 client = TelegramClient('megazord_session', API_ID, API_HASH)
 
+def _send_via_bot(token, chat_id, text):
+    """Gọi Bot API sendMessage để CHÍNH bot (token) tự gửi 1 tin tới chat_id.
+    Plain text (không parse_mode) — tin kèo/report chỉ chứa emoji, không markdown.
+    Trả (ok: bool, description: str). KHÔNG raise — lỗi mạng cũng trả (False, ...)."""
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=15,
+        )
+        data = r.json()
+        return bool(data.get('ok')), str(data.get('description', '') or '')
+    except Exception as e:
+        return False, f"lỗi kết nối: {e}"
+
 async def broadcast_to_bots(message):
-    """Gửi 1 tin nhắn tới tất cả bot đích (giãn 1 giây/bot để tránh FloodWait)"""
-    for bot in TARGET_BOTS:
+    """Mỗi bot đích TỰ gửi 1 tin nhắn tới DM của chính chủ (OWNER_ID) qua Bot API.
+    Chạy trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram."""
+    if OWNER_ID is None:
+        print("   ⚠️ Chưa có OWNER_ID — bỏ qua broadcast (lẽ ra đã gán lúc khởi động).")
+        return
+    sent = 0
+    for token in TARGET_BOT_TOKENS:
+        bot_id = token.split(':', 1)[0]  # chỉ phần id, KHÔNG lộ token
         try:
-            await client.send_message(bot, message)
-            await asyncio.sleep(1)
+            ok, desc = await asyncio.to_thread(_send_via_bot, token, OWNER_ID, message)
+            if ok:
+                sent += 1
+            else:
+                hint = " (chính chủ đã /start bot này chưa?)" if 'chat not found' in desc.lower() else ""
+                print(f"   ⚠️ Bot {bot_id} gửi lỗi: {desc}{hint}")
+            await asyncio.sleep(0.3)
         except Exception as e:
-            print(f"   ⚠️ Không gửi được tới {bot}: {e}")
+            print(f"   ⚠️ Bot {bot_id} gửi lỗi: {e}")
+    print(f"   📤 Đã phát {sent}/{len(TARGET_BOT_TOKENS)} bot")
 
 # ==========================================
 # 2. KHỐI VỆ TINH BINANCE (QUANT ENGINE V6)
@@ -691,13 +728,17 @@ async def command_handler(event):
             except Exception as e:
                 results.append(f"❌ Database SQLite: {e}")
 
-            for bot in TARGET_BOTS:
-                try:
-                    await client.send_message(bot, "🧪 TIN TEST từ Siêu Megazord V6 — kênh gửi hoạt động tốt!")
-                    results.append(f"✅ Gửi tới {bot}: OK")
-                    await asyncio.sleep(1)
-                except Exception as e:
-                    results.append(f"❌ Gửi tới {bot}: {e} (đã bấm /start với bot này chưa?)")
+            for token in TARGET_BOT_TOKENS:
+                bot_id = token.split(':', 1)[0]   # chỉ hiện id, KHÔNG lộ token
+                ok, desc = await asyncio.to_thread(
+                    _send_via_bot, token, OWNER_ID,
+                    "🧪 TIN TEST từ Siêu Megazord V6 — bot tự gửi hoạt động tốt!")
+                if ok:
+                    results.append(f"✅ Bot {bot_id} tự gửi: OK")
+                else:
+                    hint = " (chính chủ đã /start bot này chưa?)" if 'chat not found' in desc.lower() else ""
+                    results.append(f"❌ Bot {bot_id}: {desc}{hint}")
+                await asyncio.sleep(0.3)
 
             results.append(f"\n📡 Nguồn đang nghe: {SOURCE_BOT}")
             await event.reply("🧪 **KẾT QUẢ TỰ KIỂM TRA:**\n" + "\n".join(results))
@@ -916,6 +957,10 @@ async def auto_send_report(missed_at=None):
     set_state('last_report_sent', datetime.datetime.now(VN_TZ).isoformat())
 
 async def main():
+    global OWNER_ID
+    me = await client.get_me()
+    OWNER_ID = me.id   # chat_id để mọi bot đích tự gửi report về DM của chính chủ
+
     scheduler = AsyncIOScheduler(timezone=VN_TZ)
     scheduler.add_job(auto_send_report, 'cron', hour=7, minute=0)
     scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
@@ -927,7 +972,8 @@ async def main():
     scheduler.start()
 
     print("🚀 SIÊU MEGAZORD V6 ĐÃ LÊN NÒNG! VẮT KIỆT TÀI NGUYÊN BINANCE API TỚI GIỌT CUỐI CÙNG.")
-    print(f"   📡 Nguồn vào: {SOURCE_BOT} | 📤 Bot đích ({len(TARGET_BOTS)}): {', '.join(str(b) for b in TARGET_BOTS)}")
+    _bot_ids = ', '.join(t.split(':', 1)[0] for t in TARGET_BOT_TOKENS)  # chỉ in id, KHÔNG lộ token
+    print(f"   📡 Nguồn vào: {SOURCE_BOT} | 📤 Phát qua {len(TARGET_BOT_TOKENS)} bot token → DM của bạn (id {OWNER_ID}): {_bot_ids}")
     ml_info = ml_predict.get_model_info() if HAS_ML_PREDICT else None
     if ml_info:
         print(f"   🤖 ML shadow: model {ml_info['version']}"

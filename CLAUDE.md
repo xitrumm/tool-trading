@@ -12,13 +12,13 @@ File này cung cấp ngữ cảnh cho Claude Code (claude.ai/code) khi làm vi�
 4. **Đối chiếu Binance**: kỹ thuật (EMA 7/25/99, RSI), thời tiết thị trường (BTC+ETH), phái sinh (L/S Ratio, Funding Rate, Open Interest).
 5. **Phân hạng kèo**: VIP (🌟) / Thường (✅) / Loại — Xịt (❌), lưu vào SQLite.
 6. **Chấm điểm & chọn TOP PICK**: mỗi kèo chốt được chấm 0-100 điểm, xếp hạng so với các kèo khác trong ngày; hạng 1 (hoặc hạng 2 điểm ≥ 70) gắn 🏆 TOP PICK.
-7. **Phát kèo real-time**: kèo chốt (VIP/Thường) broadcast NGAY tới tất cả bot đích trong `TARGET_BOTS`, kèm điểm + hạng + Entry/Stoploss/TP1/TP2.
-8. **Báo cáo & backup tự động**: báo cáo gửi vào Saved Messages + tất cả bot đích 2 lần/ngày, backup DB lên Google Drive 2 lần/ngày.
+7. **Phát kèo real-time**: kèo chốt (VIP/Thường) broadcast NGAY — **mỗi bot đích TỰ gửi** tin qua Bot API (token) vào DM giữa bot và chính chủ (`OWNER_ID`), kèm điểm + hạng + Entry/Stoploss/TP1/TP2.
+8. **Báo cáo & backup tự động**: báo cáo gửi vào Saved Messages + tất cả bot đích (mỗi bot tự gửi) 2 lần/ngày, backup DB lên Google Drive 2 lần/ngày.
 9. **Chống mất dữ liệu khi tool tắt**: lúc khởi động tự đọc bù tin nhắn bị lỡ của bot nguồn và gửi bù báo cáo nếu offline qua mốc 07:00/16:00 (trạng thái lưu trong bảng `bot_state`).
 10. **ML shadow mode** (xem mục "Khối ML"): model ML chấm xác suất kèo chạm TP1 trước SL hiển thị SONG SONG với điểm rule (không can thiệp quyết định); radar IsolationForest tự quét coin có volume/giá bất thường làm nguồn tín hiệu thứ 2; mọi kèo phát ra được tự động chấm kết quả thắng/thua để tích lũy dữ liệu huấn luyện.
 
 ```
-SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → TARGET_BOTS (n bot đích) + Saved Messages
+SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → n bot đích TỰ gửi (Bot API → DM chính chủ) + Saved Messages
 ```
 
 ## ⚠️ Trạng thái mã nguồn (QUAN TRỌNG)
@@ -27,7 +27,7 @@ SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → TARGET_BOTS (n bot 
 - `bottrading.txt` là bản dán gốc (bị lặp 2 lần cùng một nội dung), chỉ giữ để tham khảo — KHÔNG sửa/chạy file này, có thể xóa khi không cần.
 - Cấu hình KHÔNG nằm trong code mà đọc từ 2 file ngoài (cùng thư mục với `bottrading.py`):
   - `config.txt` — `API_ID`, `API_HASH` (lấy từ https://my.telegram.org) và `SOURCE_BOT` (bot nguồn), dạng `KEY=VALUE`. **Chứa secret thật → đã gitignore.**
-  - `target_bots.txt` — danh sách bot đích, mỗi dòng 1 bot (@username hoặc ID số), dòng `#` là comment.
+  - `target_bots.txt` — danh sách **token** bot đích (lấy từ @BotFather, dạng `123456789:ABC...`), mỗi dòng 1 token, dòng `#` là comment. Mỗi bot dùng token này để TỰ gửi report qua Bot API. **Chứa secret thật (token) → đã gitignore.**
 - Trên máy hiện tại cả 2 file **đã điền giá trị thật** (đã chạy thật, có `megazord_session.session` + `trading_memory.db`). Khi setup máy mới: phải tự điền — thiếu file / thiếu giá trị → bot in lỗi tiếng Việt rõ ràng và thoát ngay lúc khởi động (`SystemExit` trong `load_config` / `load_target_bots`).
 - Nơi backup DB chọn tự động qua `get_backup_dir()`: ưu tiên `G:\My Drive\Trading_Bot` (Google Drive for desktop mount ổ G:), nếu ổ G: chưa mount thì fallback sang `Desktop\Trading_Bot` (có xử lý cả trường hợp Desktop bị OneDrive chuyển hướng).
 
@@ -40,8 +40,8 @@ pip install -r requirements.txt
 # 2. Mở config.txt — điền API_ID, API_HASH thật (my.telegram.org → API development tools)
 #    và SOURCE_BOT (@username hoặc ID số của bot nguồn cần đọc)
 
-# 3. Mở target_bots.txt — mỗi dòng 1 bot đích sẽ nhận kết quả
-#    Nhớ bấm /start với TỪNG bot đích trước!
+# 3. Mở target_bots.txt — mỗi dòng 1 TOKEN bot đích (lấy từ @BotFather)
+#    Nhớ chính chủ bấm /start với TỪNG bot trước (không thì Bot API báo "chat not found")!
 
 # 4. Chạy bot
 python bottrading.py
@@ -99,7 +99,7 @@ Watchlist Mới thêm:
 - Soi ngay khung 1H + 4H (`BinanceRadar.analyze_convergence` — 2 call klines), KHÔNG qua gác cổng EMA và KHÔNG ghi bảng `signals` (tránh cộng lượt nhắc ảo).
 - Điều kiện bắn: |biến động giá 24h| < 10% **HOẶC** giá còn nằm trong dải Bollinger MA99 (SMA99 ± 2σ) khung 1H — coin đã pump quá thì im lặng (chỉ log console).
 - Entry = giá đóng 1H mới nhất; TP1 = kháng cự (pivot high cửa sổ 3-3) 1H gần nhất phía trên, tối thiểu +1% (không có → +3%); TP2 = kháng cự 4H nằm trên TP1 (không có → +6%); SL = hỗ trợ (pivot low) 1H gần nhất phía dưới, tối thiểu −1%, hỗ trợ xa hơn −8% thì lùi về −5%.
-- Format broadcast tới TARGET_BOTS:
+- Format broadcast (mỗi bot đích tự gửi qua Bot API):
 ```
 👀Capital Convergence
 ✅ENJ: Nhiều nguồn vốn cùng chảy về 1 coin
@@ -137,7 +137,7 @@ BƯỚC 3 — Chấm điểm & xếp hạng (`compute_score` + `get_today_rank`)
         Hạng 1 (hoặc hạng 2 với điểm ≥ 70) = 🏆 TOP PICK.
         │
         ▼
-Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY tới mọi bot trong TARGET_BOTS
+Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY (mỗi bot đích tự gửi qua Bot API tới DM chính chủ)
 theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
 ```
 
@@ -269,7 +269,7 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 
 | Khối | Thành phần | Vai trò |
 |---|---|---|
-| 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc `target_bots.txt`), `_parse_entity`, `client`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT/TARGET_BOTS từ file ngoài, khởi tạo Telethon session `megazord_session`, định tuyến nguồn vào/đầu ra |
+| 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc token từ `target_bots.txt`), `_parse_entity`, `client`, `_send_via_bot`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT + TOKEN bot đích từ file ngoài, khởi tạo Telethon session `megazord_session` (nguồn vào) + gửi ra qua Bot API (mỗi bot tự gửi tới `OWNER_ID`) |
 | 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `find_pivot_levels`, `analyze_convergence`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H + soi nhanh 1H/4H (pivot kháng cự/hỗ trợ, Bollinger MA99) cho cảnh báo Capital Convergence |
 | 3. Lưu trữ | `init_db` (kèm migrate + DDL ML), `insert_db`, `get_state`, `set_state`, `get_backup_dir`, `backup_to_drive` | SQLite (5 bảng: signals, money_flow, bot_state, ml_samples, anomaly_alerts) + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
 | 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, 🏆 top 1-2 kèo điểm cao nhất (kèm Entry/SL/TP), các kèo Hoa Hậu khác xếp theo điểm, kèo rác trong ngày |
@@ -279,10 +279,10 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 
 ## Lưu ý kỹ thuật khi sửa code
 
-- **Userbot, không phải bot API**: đăng nhập bằng tài khoản cá nhân. Nguồn vào lọc bằng `events.NewMessage(chats=SOURCE_BOT, incoming=True)` — muốn nghe thêm nhiều nguồn, đổi thành list `chats=[bot1, bot2]`.
+- **Userbot cho NGUỒN VÀO + Bot API cho ĐẦU RA (hybrid)**: tài khoản cá nhân (Telethon) chỉ dùng để NGHE `SOURCE_BOT` — `events.NewMessage(chats=SOURCE_BOT, incoming=True)` (muốn nghe thêm nhiều nguồn, đổi thành list `chats=[bot1, bot2]`). Khâu PHÁT ra ngoài KHÔNG còn dùng userbot mà gọi **Bot API** (`_send_via_bot` → `api.telegram.org/bot<TOKEN>/sendMessage`): mỗi bot đích tự gửi report vào DM của chính chủ (`OWNER_ID`, lấy 1 lần lúc khởi động qua `client.get_me()`). Lý do: bot không thể nhắn cho bot khác, nên chỉ tài khoản cá nhân mới NGHE được bot nguồn; nhưng để tin xuất hiện DO bot đích đăng thì phải dùng token của chúng.
 - **Timestamp tin nhắn lấy theo giờ GỬI** (`message.date` đổi sang `VN_TZ`), không phải giờ xử lý — để tin đọc bù được ghi đúng ngày. Khi sửa logic thời gian, dùng `VN_TZ` (global), tránh `datetime.now()` trần.
 - **Đọc bù có thể trùng 1 tin**: `last_msg_id` ghi sau khi xử lý xong; nếu tool chết GIỮA LÚC đang xử lý 1 tin, tin đó sẽ được xử lý lại khi khởi động (coin bị đếm 2 lần) — chấp nhận được, hiếm gặp.
-- **Bot đích phải được /start trước**: Telegram chặn user nhắn cho bot chưa từng bắt chuyện. `broadcast_to_bots` giãn 1 giây giữa các lần gửi để tránh FloodWait; bot nào gửi lỗi chỉ in log, không làm dừng vòng gửi.
+- **Chính chủ phải /start TỪNG bot đích trước**: Bot API chỉ cho bot nhắn tới user đã từng bắt chuyện với nó — chưa /start thì `sendMessage` trả `chat not found`. `broadcast_to_bots` lặp qua `TARGET_BOT_TOKENS`, mỗi token gọi `_send_via_bot` trong `asyncio.to_thread` (không nghẽn event loop), giãn 0.3s/bot; bot nào lỗi chỉ in `bot_id` + `description` (KHÔNG lộ token), không dừng vòng gửi. Token là secret → không bao giờ in ra log/console.
 - **Lệnh /stats, /backup** bắt qua handler riêng `events.NewMessage(outgoing=True)` — chỉ tin nhắn do CHÍNH bạn gõ, ở bất kỳ chat nào.
 - **Blocking trong async**: `check_and_evaluate` (đã chuyển sang `async def`) vẫn dùng `requests` đồng bộ bên trong → block event loop khi phân tích (mỗi coin tốn ~6-8 HTTP call). Nếu tối ưu, cân nhắc `asyncio.to_thread` hoặc `aiohttp`.
 - **Nuốt lỗi**: nhiều chỗ `except: pass` / trả giá trị mặc định (`spy_on_derivatives` lỗi trả `1.0, 0.0, 0.0` — L/S=1.0 có thể làm sai điều kiện VIP). Khi debug nên thêm log trước.
@@ -291,5 +291,5 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 - `numpy` được import nhưng không dùng trực tiếp (pandas cần nó ngầm).
 - Coin symbol tự động ghép `USDT` khi gọi Binance (`{coin}USDT`) — chỉ hỗ trợ cặp USDT.
 - File config đọc bằng `encoding='utf-8-sig'` để chấp nhận cả file lưu từ Notepad (UTF-8 có BOM). ID số trong config tự chuyển sang `int` qua `_parse_entity` (Telethon yêu cầu ID là số nguyên).
-- Không commit: `config.txt` (chứa API_HASH thật), `megazord_session.session`, `trading_memory.db`, `temp_data.xlsx`, `models/` + `*.pkl` (model ML — tạo lại được bằng train_model.py) — `.gitignore` đã chặn sẵn các file này.
+- Không commit: `config.txt` (chứa API_HASH thật), `target_bots.txt` (chứa TOKEN bot — secret), `megazord_session.session`, `trading_memory.db`, `temp_data.xlsx`, `models/` + `*.pkl` (model ML — tạo lại được bằng train_model.py) — `.gitignore` đã chặn sẵn các file này.
 - **Job ML chạy nặng phải qua `asyncio.to_thread`**: radar quét ~150 request/lượt và labeler fetch nến theo lô — cả 2 đã chạy trong thread riêng để không nghẽn event loop Telegram (khác với `check_and_evaluate` cũ vẫn block — xem mục Blocking ở trên). Code ML mới nên giữ nguyên pattern này.
