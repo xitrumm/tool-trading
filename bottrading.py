@@ -99,6 +99,7 @@ API_ID = int(_cfg['API_ID'])                    # Dãy số ID từ my.telegram.
 API_HASH = _cfg['API_HASH']                     # Chuỗi Hash từ my.telegram.org
 SOURCE_BOT = _parse_entity(_cfg['SOURCE_BOT'])  # Bot nguồn: chỉ đọc tin nhắn từ bot này
 TARGET_BOT_TOKENS = load_target_bots()          # Token các bot đích: mỗi bot relay report tới subscriber của nó
+MY_ID = None                                    # user-id chính chủ — gán lúc khởi động; lệnh chỉ nhận trong Saved Messages
 
 client = TelegramClient('megazord_session', API_ID, API_HASH)
 
@@ -538,7 +539,7 @@ def generate_report(is_auto=False):
 
         df_xit = pd.read_sql_query(f"SELECT type, COUNT(*) as cnt FROM signals WHERE type LIKE 'XIT_%' AND date LIKE '{now_date}%' GROUP BY type", conn)
         if not df_xit.empty:
-            report += f"\n**🛡️ ĐÃ CHẶN KÈO RÁC (HÔM NAY):**\n"
+            report += f"\n**🛡️ CÁC KÈO ĐÃ BỎ QUA (HÔM NAY):**\n"
             for _, row in df_xit.iterrows(): report += f"  • {row['type']}: {row['cnt']} lệnh\n"
     except Exception as e: report += f"Lỗi xuất báo cáo: {e}"
     conn.close()
@@ -796,12 +797,16 @@ async def main_handler(event):
 
 @client.on(events.NewMessage(outgoing=True))
 async def command_handler(event):
-    """Lệnh điều khiển — gõ từ chính tài khoản của bạn, ở bất kỳ chat nào"""
+    """Lệnh điều khiển — CHỈ nhận trong Saved Messages (chat với chính mình), chat khác bỏ qua"""
     try:
+        if MY_ID is None or event.chat_id != MY_ID:   # chỉ Saved Messages mới điều khiển được
+            return
         text = (event.raw_text or '').strip().lower()
         if text == '/stats':
-            await event.reply("⚙️ Đang lên báo cáo dòng tiền tổng hợp V6...")
-            await event.reply(generate_report())
+            await event.reply("⚙️ Đang lên báo cáo & đẩy tới tất cả subscriber...")
+            report = generate_report()
+            await event.reply(report)
+            await broadcast_to_bots(report)   # đẩy report tới subscriber của mọi bot đích
         elif text == '/backup':
             dest = backup_to_drive()
             if dest:
@@ -1074,6 +1079,9 @@ async def auto_send_report(missed_at=None):
     set_state('last_report_sent', datetime.datetime.now(VN_TZ).isoformat())
 
 async def main():
+    global MY_ID
+    MY_ID = (await client.get_me()).id   # để lệnh điều khiển chỉ nhận trong Saved Messages
+
     scheduler = AsyncIOScheduler(timezone=VN_TZ)
     scheduler.add_job(auto_send_report, 'cron', hour=7, minute=0)
     scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
