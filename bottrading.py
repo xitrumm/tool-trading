@@ -803,10 +803,8 @@ async def command_handler(event):
             return
         text = (event.raw_text or '').strip().lower()
         if text == '/stats':
-            await event.reply("⚙️ Đang lên báo cáo & đẩy tới tất cả subscriber...")
-            report = generate_report()
-            await event.reply(report)
-            await broadcast_to_bots(report)   # đẩy report tới subscriber của mọi bot đích
+            await event.reply("⚙️ Đang lên báo cáo dòng tiền tổng hợp V6...")
+            await event.reply(generate_report())
         elif text == '/backup':
             dest = backup_to_drive()
             if dest:

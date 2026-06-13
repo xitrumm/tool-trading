@@ -68,7 +68,7 @@ Gõ trong **Saved Messages** (chat với chính mình). Lệnh gõ ở chat khá
 
 | Lệnh | Tác dụng |
 |---|---|
-| `/stats` | Trả về báo cáo dòng tiền tổng hợp trong ngày (top ngành hút tiền, 🏆 top 1-2 kèo đáng giá nhất kèm Entry/SL/TP, các kèo Hoa Hậu khác xếp theo điểm giảm dần, kèo rác đã chặn) **và đẩy report tới subscriber của mọi bot đích** (`broadcast_to_bots`) |
+| `/stats` | Trả về báo cáo dòng tiền tổng hợp trong ngày (top ngành hút tiền, 🏆 top 1-2 kèo đáng giá nhất kèm Entry/SL/TP, các kèo Hoa Hậu khác xếp theo điểm giảm dần, các kèo đã bỏ qua) |
 | `/backup` | Copy `trading_memory.db` lên Google Drive ngay (ổ G: chưa mount → lưu `Desktop\Trading_Bot`); trả lời kèm đường dẫn đã lưu |
 | `/test` | Tự kiểm tra: Binance Spot/Futures, SQLite, và TỪNG bot đích (gọi `getMe` xác thực token + đếm số người đăng ký) — KHÔNG gửi tin tới subscriber để tránh spam |
 | `/subs` | Quét ngay (`getUpdates`) & liệt kê người đăng ký theo từng bot đích (số người + tên) |
@@ -290,7 +290,7 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 - **Timestamp tin nhắn lấy theo giờ GỬI** (`message.date` đổi sang `VN_TZ`), không phải giờ xử lý — để tin đọc bù được ghi đúng ngày. Khi sửa logic thời gian, dùng `VN_TZ` (global), tránh `datetime.now()` trần.
 - **Đọc bù có thể trùng 1 tin**: `last_msg_id` ghi sau khi xử lý xong; nếu tool chết GIỮA LÚC đang xử lý 1 tin, tin đó sẽ được xử lý lại khi khởi động (coin bị đếm 2 lần) — chấp nhận được, hiếm gặp.
 - **Người nhận phải /start bot đích trước**: Bot API chỉ cho bot nhắn tới user đã từng bắt chuyện với nó. Tool KHÔNG tự biết ai đã /start — phải `getUpdates` gom `chat_id` rồi mới gửi được (xem "Cơ chế subscriber"). `broadcast_to_bots` lặp `TARGET_BOT_TOKENS` → với mỗi bot lấy `get_subscribers(bot_id)` rồi gọi `_send_via_bot` cho từng người trong `asyncio.to_thread` (không nghẽn event loop), giãn 0.05s/người; lỗi `blocked`/`deactivated`/`chat not found` → `remove_subscriber` gỡ người đó. Token là secret → chỉ in nhãn tên bot (`label`), KHÔNG bao giờ in token/`bot_id` đầy đủ ra log.
-- **Lệnh /stats, /backup, /test, /subs, /ml, /radar** bắt qua handler riêng `events.NewMessage(outgoing=True)`, và chỉ chạy khi `event.chat_id == MY_ID` (= **Saved Messages**, chat với chính mình). `MY_ID` lấy 1 lần lúc khởi động qua `client.get_me()`. Gõ lệnh ở chat khác → bị bỏ qua. Riêng `/stats` ngoài việc reply còn `broadcast_to_bots(report)` để đẩy tới subscriber.
+- **Lệnh /stats, /backup, /test, /subs, /ml, /radar** bắt qua handler riêng `events.NewMessage(outgoing=True)`, và chỉ chạy khi `event.chat_id == MY_ID` (= **Saved Messages**, chat với chính mình). `MY_ID` lấy 1 lần lúc khởi động qua `client.get_me()`. Gõ lệnh ở chat khác → bị bỏ qua.
 - **Blocking trong async**: `check_and_evaluate` (đã chuyển sang `async def`) vẫn dùng `requests` đồng bộ bên trong → block event loop khi phân tích (mỗi coin tốn ~6-8 HTTP call). Nếu tối ưu, cân nhắc `asyncio.to_thread` hoặc `aiohttp`.
 - **Nuốt lỗi**: nhiều chỗ `except: pass` / trả giá trị mặc định (`spy_on_derivatives` lỗi trả `1.0, 0.0, 0.0` — L/S=1.0 có thể làm sai điều kiện VIP). Khi debug nên thêm log trước.
 - **Binance API không cần key** (toàn endpoint public) nhưng có rate limit — tránh spam `analyze_coin`.
