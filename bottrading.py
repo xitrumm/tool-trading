@@ -68,67 +68,84 @@ def load_config():
 
 def load_target_bots():
     """Đọc target_bots.txt — mỗi dòng 1 TOKEN bot đích (dạng 123456789:ABC... từ BotFather),
-    hỗ trợ comment #. Token sai format bị bỏ qua (in cảnh báo, KHÔNG in token vì là secret)."""
+    kèm nhãn tên tùy chọn sau dấu # để dễ nhớ. Trả list (token, label).
+    Token sai format bị bỏ qua (in cảnh báo, KHÔNG in token vì là secret)."""
     if not os.path.exists(TARGET_BOTS_FILE):
         raise SystemExit(f"❌ Không tìm thấy {TARGET_BOTS_FILE} — tạo file, mỗi dòng 1 token bot đích (lấy từ @BotFather)")
-    tokens = []
+    bots = []
     with open(TARGET_BOTS_FILE, 'r', encoding='utf-8-sig') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
                 continue
-            if re.match(r'^\d+:.+$', line):
-                tokens.append(line)
-            else:
+            # Cho phép ghi chú tên bot sau token để dễ nhớ:
+            #   8913020297:ABC... #xitrumm   HOẶC   8913020297:ABC... xitrumm
+            # → token là field đầu (không chứa khoảng trắng); nhãn lấy sau dấu #
+            #   (không có # thì lấy phần sau khoảng trắng; không có gì thì dùng id bot).
+            before, _, after = line.partition('#')
+            parts = before.split()
+            token = parts[0] if parts else ''
+            if not re.match(r'^\d+:.+$', token):
                 print(f"   ⚠️ Bỏ qua 1 dòng trong {os.path.basename(TARGET_BOTS_FILE)}: sai format token (cần dạng 123456789:ABC...)")
-    if not tokens:
+                continue
+            label = after.strip() or (' '.join(parts[1:]) if len(parts) > 1 else '') or token.split(':', 1)[0]
+            bots.append((token, label))
+    if not bots:
         raise SystemExit(f"❌ {TARGET_BOTS_FILE} không có token hợp lệ — thêm ít nhất 1 token bot (dạng 123456789:ABC... từ @BotFather)")
-    return tokens
+    return bots
 
 _cfg = load_config()
 API_ID = int(_cfg['API_ID'])                    # Dãy số ID từ my.telegram.org
 API_HASH = _cfg['API_HASH']                     # Chuỗi Hash từ my.telegram.org
 SOURCE_BOT = _parse_entity(_cfg['SOURCE_BOT'])  # Bot nguồn: chỉ đọc tin nhắn từ bot này
-TARGET_BOT_TOKENS = load_target_bots()          # Token các bot đích: mỗi bot TỰ gửi report qua Bot API
-OWNER_ID = None                                 # chat_id chính chủ — gán lúc khởi động qua client.get_me()
+TARGET_BOT_TOKENS = load_target_bots()          # Token các bot đích: mỗi bot relay report tới subscriber của nó
 
 client = TelegramClient('megazord_session', API_ID, API_HASH)
 
-def _send_via_bot(token, chat_id, text):
-    """Gọi Bot API sendMessage để CHÍNH bot (token) tự gửi 1 tin tới chat_id.
-    Plain text (không parse_mode) — tin kèo/report chỉ chứa emoji, không markdown.
-    Trả (ok: bool, description: str). KHÔNG raise — lỗi mạng cũng trả (False, ...)."""
+def _bot_api(token, method, params=None):
+    """Gọi 1 method Bot API (sendMessage/getMe/getUpdates...), trả dict JSON.
+    KHÔNG raise — lỗi mạng trả {'ok': False, 'description': ...}."""
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat_id, "text": text},
-            timeout=15,
-        )
-        data = r.json()
-        return bool(data.get('ok')), str(data.get('description', '') or '')
+        r = requests.post(f"https://api.telegram.org/bot{token}/{method}",
+                          json=params or {}, timeout=20)
+        return r.json()
     except Exception as e:
-        return False, f"lỗi kết nối: {e}"
+        return {"ok": False, "description": f"lỗi kết nối: {e}"}
+
+def _send_via_bot(token, chat_id, text):
+    """CHÍNH bot (token) tự gửi 1 tin tới chat_id. Plain text (không parse_mode) —
+    tin kèo/report chỉ chứa emoji, không markdown. Trả (ok: bool, description: str)."""
+    data = _bot_api(token, "sendMessage", {"chat_id": chat_id, "text": text})
+    return bool(data.get('ok')), str(data.get('description', '') or '')
 
 async def broadcast_to_bots(message):
-    """Mỗi bot đích TỰ gửi 1 tin nhắn tới DM của chính chủ (OWNER_ID) qua Bot API.
-    Chạy trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram."""
-    if OWNER_ID is None:
-        print("   ⚠️ Chưa có OWNER_ID — bỏ qua broadcast (lẽ ra đã gán lúc khởi động).")
-        return
-    sent = 0
-    for token in TARGET_BOT_TOKENS:
-        bot_id = token.split(':', 1)[0]  # chỉ phần id, KHÔNG lộ token
-        try:
-            ok, desc = await asyncio.to_thread(_send_via_bot, token, OWNER_ID, message)
-            if ok:
-                sent += 1
-            else:
-                hint = " (chính chủ đã /start bot này chưa?)" if 'chat not found' in desc.lower() else ""
-                print(f"   ⚠️ Bot {bot_id} gửi lỗi: {desc}{hint}")
-            await asyncio.sleep(0.3)
-        except Exception as e:
-            print(f"   ⚠️ Bot {bot_id} gửi lỗi: {e}")
-    print(f"   📤 Đã phát {sent}/{len(TARGET_BOT_TOKENS)} bot")
+    """Mỗi bot đích RELAY tin tới TẤT CẢ người đã đăng ký bot đó (đã /start hoặc nhắn tin —
+    chat_id thu thập qua getUpdates, lưu bảng bot_subscribers). Người block/xoá bot bị gỡ tự động.
+    Chạy gửi trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram."""
+    total_sent = 0
+    for token, label in TARGET_BOT_TOKENS:
+        bot_id = token.split(':', 1)[0]
+        subs = get_subscribers(bot_id)
+        if not subs:
+            print(f"   ⚠️ Bot {label}: chưa có người đăng ký — nhờ người tạo bot nhắn /start lại khi tool đang chạy (gõ /subs để quét).")
+            continue
+        sent = 0
+        for chat_id, name in subs:
+            try:
+                ok, desc = await asyncio.to_thread(_send_via_bot, token, chat_id, message)
+                if ok:
+                    sent += 1
+                    total_sent += 1
+                elif any(k in desc.lower() for k in ('blocked', 'deactivated', 'chat not found')):
+                    remove_subscriber(bot_id, chat_id)   # người đã block/xoá bot → ngừng gửi
+                    print(f"   🧹 Bot {label}: gỡ {name} ({desc})")
+                else:
+                    print(f"   ⚠️ Bot {label} → {name} lỗi: {desc}")
+                await asyncio.sleep(0.05)
+            except Exception as e:
+                print(f"   ⚠️ Bot {label} → {name} lỗi: {e}")
+        print(f"   📤 Bot {label}: gửi {sent}/{len(subs)} người")
+    print(f"   📤 Tổng đã phát: {total_sent} tin")
 
 # ==========================================
 # 2. KHỐI VỆ TINH BINANCE (QUANT ENGINE V6)
@@ -303,6 +320,10 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS signals (date TEXT, coin TEXT, timeframe TEXT, type TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS money_flow (date TEXT, sector_from TEXT, sector_to TEXT)''')
     c.execute('''CREATE TABLE IF NOT EXISTS bot_state (key TEXT PRIMARY KEY, value TEXT)''')
+    # Người đăng ký của từng bot đích (getUpdates thu thập): mỗi bot relay tin tới đây
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_subscribers (
+        bot_id TEXT, chat_id INTEGER, name TEXT, first_seen TEXT,
+        PRIMARY KEY (bot_id, chat_id))''')
     # Migrate DB cũ: thêm cột điểm + trade plan cho bảng signals (đã có thì bỏ qua)
     for col in ('score REAL', 'entry REAL', 'stoploss REAL', 'tp1 REAL', 'tp2 REAL'):
         try: c.execute(f'ALTER TABLE signals ADD COLUMN {col}')
@@ -348,6 +369,93 @@ def set_state(key, value):
         conn.commit()
         conn.close()
     except Exception: pass
+
+def _upsert_subscriber(bot_id, chat_id, name):
+    """Thêm/cập nhật 1 người đăng ký của bot. Trả True nếu là người MỚI."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM bot_subscribers WHERE bot_id=? AND chat_id=?", (bot_id, chat_id))
+        is_new = c.fetchone() is None
+        if is_new:
+            c.execute("INSERT INTO bot_subscribers (bot_id, chat_id, name, first_seen) VALUES (?,?,?,?)",
+                      (bot_id, chat_id, name, datetime.datetime.now(VN_TZ).isoformat()))
+        else:
+            c.execute("UPDATE bot_subscribers SET name=? WHERE bot_id=? AND chat_id=?", (name, bot_id, chat_id))
+        conn.commit()
+        conn.close()
+        return is_new
+    except Exception:
+        return False
+
+def get_subscribers(bot_id):
+    """Danh sách (chat_id, name) đã đăng ký bot này."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("SELECT chat_id, name FROM bot_subscribers WHERE bot_id=?", (bot_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+def remove_subscriber(bot_id, chat_id):
+    """Gỡ 1 người (đã block/xoá bot) khỏi danh sách đăng ký."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("DELETE FROM bot_subscribers WHERE bot_id=? AND chat_id=?", (bot_id, chat_id))
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+def _poll_subscribers_worker(bots):
+    """ĐỒNG BỘ (chạy trong thread qua asyncio.to_thread): getUpdates cho từng token,
+    lưu chat_id mọi người nhắn bot (private chat). Trả list (label, số_người_mới, lỗi|None).
+    LƯU Ý: Telegram chỉ giữ update ~24h — người /start lâu rồi mà không nhắn lại sẽ không bắt được."""
+    out = []
+    for token, label in bots:
+        bot_id = token.split(':', 1)[0]
+        offset = get_state(f'gu_offset_{bot_id}')
+        params = {"timeout": 0, "allowed_updates": ["message"]}
+        if offset:
+            params["offset"] = int(offset)
+        data = _bot_api(token, "getUpdates", params)
+        if not data.get('ok'):
+            out.append((label, 0, data.get('description', 'lỗi getUpdates')))
+            continue
+        updates = data.get('result', [])
+        new, max_uid = 0, (int(offset) - 1 if offset else None)
+        for upd in updates:
+            uid = upd.get('update_id', 0)
+            max_uid = uid if max_uid is None else max(max_uid, uid)
+            chat = (upd.get('message') or {}).get('chat') or {}
+            if chat.get('type') == 'private' and chat.get('id') is not None:
+                name = (chat.get('username')
+                        or ' '.join(x for x in [chat.get('first_name'), chat.get('last_name')] if x)
+                        or str(chat['id']))
+                if _upsert_subscriber(bot_id, int(chat['id']), name):
+                    new += 1
+        if updates and max_uid is not None:
+            set_state(f'gu_offset_{bot_id}', max_uid + 1)   # xác nhận đã đọc, lần sau lấy update mới
+        out.append((label, new, None))
+    return out
+
+async def poll_subscribers_job():
+    """Quét người đăng ký mới cho mọi bot đích (chạy lúc khởi động + định kỳ)."""
+    if not TARGET_BOT_TOKENS:
+        return
+    res = await asyncio.to_thread(_poll_subscribers_worker, list(TARGET_BOT_TOKENS))
+    for label, new, err in res:
+        if err:
+            print(f"   ⚠️ Poll subscriber {label}: {err}")
+        elif new:
+            print(f"   👥 Bot {label}: +{new} người đăng ký mới")
+    set_state('last_subs_poll', datetime.datetime.now(VN_TZ).isoformat())
 
 def get_backup_dir():
     """Ưu tiên Google Drive (ổ G:); chưa mount thì lưu vào Desktop\\Trading_Bot"""
@@ -728,20 +836,29 @@ async def command_handler(event):
             except Exception as e:
                 results.append(f"❌ Database SQLite: {e}")
 
-            for token in TARGET_BOT_TOKENS:
-                bot_id = token.split(':', 1)[0]   # chỉ hiện id, KHÔNG lộ token
-                ok, desc = await asyncio.to_thread(
-                    _send_via_bot, token, OWNER_ID,
-                    "🧪 TIN TEST từ Siêu Megazord V6 — bot tự gửi hoạt động tốt!")
-                if ok:
-                    results.append(f"✅ Bot {bot_id} tự gửi: OK")
+            for token, label in TARGET_BOT_TOKENS:
+                me_data = await asyncio.to_thread(_bot_api, token, "getMe", None)
+                if me_data.get('ok'):
+                    uname = me_data['result'].get('username', '?')
+                    nsubs = len(get_subscribers(token.split(':', 1)[0]))
+                    note = "" if nsubs else " — chưa ai đăng ký, nhờ người tạo bot /start lại"
+                    results.append(f"✅ Bot {label} (@{uname}): token OK, {nsubs} người đăng ký{note}")
                 else:
-                    hint = " (chính chủ đã /start bot này chưa?)" if 'chat not found' in desc.lower() else ""
-                    results.append(f"❌ Bot {bot_id}: {desc}{hint}")
-                await asyncio.sleep(0.3)
+                    results.append(f"❌ Bot {label}: token lỗi — {me_data.get('description', '')}")
+                await asyncio.sleep(0.2)
 
             results.append(f"\n📡 Nguồn đang nghe: {SOURCE_BOT}")
+            results.append("ℹ️ /test chỉ kiểm tra token + đếm người đăng ký (không gửi tin tới họ). Gõ /subs để quét & xem danh sách.")
             await event.reply("🧪 **KẾT QUẢ TỰ KIỂM TRA:**\n" + "\n".join(results))
+        elif text == '/subs':
+            await event.reply("👥 Đang quét người đăng ký các bot đích (getUpdates)...")
+            await poll_subscribers_job()
+            lines = []
+            for token, label in TARGET_BOT_TOKENS:
+                subs = get_subscribers(token.split(':', 1)[0])
+                names = ', '.join(n for _, n in subs) if subs else '(chưa có ai — nhờ người tạo bot nhắn /start lại khi tool đang chạy)'
+                lines.append(f"• {label}: {len(subs)} người — {names}")
+            await event.reply("👥 **NGƯỜI ĐĂNG KÝ THEO BOT:**\n" + "\n".join(lines))
     except Exception as e: pass
 
 # ==========================================
@@ -957,10 +1074,6 @@ async def auto_send_report(missed_at=None):
     set_state('last_report_sent', datetime.datetime.now(VN_TZ).isoformat())
 
 async def main():
-    global OWNER_ID
-    me = await client.get_me()
-    OWNER_ID = me.id   # chat_id để mọi bot đích tự gửi report về DM của chính chủ
-
     scheduler = AsyncIOScheduler(timezone=VN_TZ)
     scheduler.add_job(auto_send_report, 'cron', hour=7, minute=0)
     scheduler.add_job(auto_send_report, 'cron', hour=16, minute=0)
@@ -969,11 +1082,13 @@ async def main():
     # Job ML: chấm kết quả kèo 6h/lần; radar quét ngay sau mỗi nến 4H đóng (giờ VN)
     scheduler.add_job(label_pending_samples_job, 'cron', hour='1,7,13,19', minute=20)
     scheduler.add_job(radar_scan_job, 'cron', hour='3,7,11,15,19,23', minute=10)
+    # Quét người đăng ký bot đích định kỳ (getUpdates) để bắt người mới /start
+    scheduler.add_job(poll_subscribers_job, 'interval', minutes=2)
     scheduler.start()
 
     print("🚀 SIÊU MEGAZORD V6 ĐÃ LÊN NÒNG! VẮT KIỆT TÀI NGUYÊN BINANCE API TỚI GIỌT CUỐI CÙNG.")
-    _bot_ids = ', '.join(t.split(':', 1)[0] for t in TARGET_BOT_TOKENS)  # chỉ in id, KHÔNG lộ token
-    print(f"   📡 Nguồn vào: {SOURCE_BOT} | 📤 Phát qua {len(TARGET_BOT_TOKENS)} bot token → DM của bạn (id {OWNER_ID}): {_bot_ids}")
+    _bot_names = ', '.join(label for _, label in TARGET_BOT_TOKENS)  # in nhãn tên, KHÔNG lộ token
+    print(f"   📡 Nguồn vào: {SOURCE_BOT} | 📤 Relay qua {len(TARGET_BOT_TOKENS)} bot tới subscriber của từng bot: {_bot_names}")
     ml_info = ml_predict.get_model_info() if HAS_ML_PREDICT else None
     if ml_info:
         print(f"   🤖 ML shadow: model {ml_info['version']}"
@@ -981,6 +1096,7 @@ async def main():
     else:
         print("   🤖 ML shadow: chưa có model — chế độ THU THẬP DỮ LIỆU (kèo vẫn được log feature + chấm kết quả)")
     backup_to_drive()
+    await poll_subscribers_job()       # quét người đăng ký bot đích ngay lúc khởi động
     await catch_up_source_messages()   # đọc bù tin nhắn bị lỡ trong lúc tool tắt
     await catch_up_missed_report()     # lỡ mốc báo cáo 07:00/16:00 thì gửi bù ngay (đã gồm kèo vừa đọc bù)
     await client.run_until_disconnected()
