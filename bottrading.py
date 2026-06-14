@@ -859,9 +859,38 @@ async def command_handler(event):
             lines = []
             for token, label in TARGET_BOT_TOKENS:
                 subs = get_subscribers(token.split(':', 1)[0])
-                names = ', '.join(n for _, n in subs) if subs else '(chưa có ai — nhờ người tạo bot nhắn /start lại khi tool đang chạy)'
-                lines.append(f"• {label}: {len(subs)} người — {names}")
+                if subs:
+                    who = '\n'.join(f"   - {n} ({c})" for c, n in subs)   # kèm chat_id để gỡ bằng /unsub
+                    lines.append(f"• {label}: {len(subs)} người\n{who}")
+                else:
+                    lines.append(f"• {label}: 0 người — (chưa có ai; nhờ người tạo bot nhắn /start khi tool đang chạy)")
+            lines.append("\nℹ️ Gỡ 1 người: /unsub <tên_bot hoặc bot_id> <chat_id>")
             await event.reply("👥 **NGƯỜI ĐĂNG KÝ THEO BOT:**\n" + "\n".join(lines))
+        elif text.startswith('/unsub'):
+            parts = (event.raw_text or '').split()
+            if len(parts) != 3:
+                await event.reply("Cú pháp: /unsub <tên_bot hoặc bot_id> <chat_id>\nVí dụ: /unsub xitrumm 6342103299 (gõ /subs để xem chat_id)")
+                return
+            _, bot_arg, chat_arg = parts
+            bot_id = label_found = None
+            for token, label in TARGET_BOT_TOKENS:
+                bid = token.split(':', 1)[0]
+                if bot_arg.lower() == label.lower() or bot_arg == bid:
+                    bot_id, label_found = bid, label
+                    break
+            if bot_id is None:
+                await event.reply(f"❌ Không tìm thấy bot '{bot_arg}'. Gõ /subs xem danh sách.")
+                return
+            try:
+                cid = int(chat_arg)
+            except ValueError:
+                await event.reply("❌ chat_id phải là số. Gõ /subs để xem chat_id.")
+                return
+            if cid not in [c for c, _ in get_subscribers(bot_id)]:
+                await event.reply(f"⚠️ {cid} không nằm trong subscriber của {label_found}.")
+                return
+            remove_subscriber(bot_id, cid)
+            await event.reply(f"🗑️ Đã gỡ {cid} khỏi subscriber của {label_found}. (Người này sẽ chỉ quay lại nếu /start hoặc nhắn bot lần nữa)")
     except Exception as e: pass
 
 # ==========================================
