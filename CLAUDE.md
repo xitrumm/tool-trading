@@ -72,7 +72,9 @@ Gõ trong **Saved Messages** (chat với chính mình). Lệnh gõ ở chat khá
 | `/backup` | Copy `trading_memory.db` lên Google Drive ngay (ổ G: chưa mount → lưu `Desktop\Trading_Bot`); trả lời kèm đường dẫn đã lưu |
 | `/test` | Tự kiểm tra: Binance Spot/Futures, SQLite, và TỪNG bot đích (gọi `getMe` xác thực token + đếm số người đăng ký) — KHÔNG gửi tin tới subscriber để tránh spam |
 | `/subs` | Quét ngay (`getUpdates`) & liệt kê người đăng ký theo từng bot đích (số người + tên + `chat_id`) |
-| `/unsub <bot> <chat_id>` | Gỡ 1 người khỏi subscriber của 1 bot (`<bot>` = tên nhãn hoặc bot_id; `<chat_id>` lấy từ `/subs`). Người bị gỡ chỉ quay lại nếu /start/nhắn bot lần nữa |
+| `/unsub <bot> <chat_id>` | Gỡ & **CHẶN VĨNH VIỄN** 1 người khỏi 1 bot (ghi `bot_blocklist`) — getUpdates KHÔNG bao giờ thêm lại dù họ nhắn bot. `<bot>` = tên nhãn hoặc bot_id; `<chat_id>` lấy từ `/subs` |
+| `/resub <bot> <chat_id>` | Bỏ chặn (xoá khỏi `bot_blocklist`) — người đó /start lại bot sẽ được nhận tin trở lại |
+| `/blocked` | Liệt kê người đang bị chặn theo từng bot đích (chat_id + thời điểm chặn) |
 | `/ml` | Trạng thái ML: version model + AUC, số mẫu live/backfill, win rate thực tế, số kèo chờ chấm kết quả, lần chạy job gần nhất |
 | `/radar` | Quét radar coin bất thường NGAY (thay vì chờ lịch 4h) — trả về danh sách coin lạ hoặc "không có gì lạ" |
 
@@ -247,6 +249,8 @@ money_flow (date TEXT, sector_from TEXT, sector_to TEXT)
 bot_state  (key TEXT PRIMARY KEY, value TEXT)   -- last_msg_id, last_report_sent, last_label_run, last_radar_scan, last_subs_poll, gu_offset_<bot_id>
 bot_subscribers (bot_id TEXT, chat_id INTEGER, name TEXT, first_seen TEXT,
             PRIMARY KEY(bot_id, chat_id))        -- người đã /start mỗi bot đích (getUpdates thu thập) → đích relay
+bot_blocklist (bot_id TEXT, chat_id INTEGER, ts TEXT,
+            PRIMARY KEY(bot_id, chat_id))        -- /unsub → chặn vĩnh viễn, _upsert_subscriber bỏ qua người trong đây
 -- Bảng ML (DDL nằm trong ml_features.ML_DDL, init_db chạy tự động):
 ml_samples (id PK, ts, coin, source 'live'|'backfill', features_json, entry, sl, tp1, tp2,
             rule_score, ml_prob, model_version,
@@ -281,9 +285,9 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 |---|---|---|
 | 1. Cấu hình | `load_config` (đọc `config.txt`), `load_target_bots` (đọc token + nhãn từ `target_bots.txt`), `_parse_entity`, `client`, `_bot_api`, `_send_via_bot`, `broadcast_to_bots` | Nạp API_ID/API_HASH/SOURCE_BOT + TOKEN bot đích từ file ngoài, khởi tạo Telethon session `megazord_session` (nguồn vào) + gửi ra qua Bot API (mỗi bot relay tới subscriber của nó) |
 | 2. Quant Engine | class `BinanceRadar` (`get_klines`, `calculate_ema`, `calculate_rsi`, `calculate_atr`, `build_trade_plan`, `find_pivot_levels`, `analyze_convergence`, `check_market_weather`, `spy_on_derivatives`, `analyze_coin`) | Gọi Binance API: klines, EMA, RSI, ATR, thời tiết BTC/ETH, phái sinh (L/S, FR, OI) + tính Entry/SL/TP1/TP2 khung 4H + soi nhanh 1H/4H (pivot kháng cự/hỗ trợ, Bollinger MA99) cho cảnh báo Capital Convergence |
-| 3. Lưu trữ | `init_db` (kèm migrate + DDL ML), `insert_db`, `get_state`, `set_state`, `_upsert_subscriber`/`get_subscribers`/`remove_subscriber`, `_poll_subscribers_worker`/`poll_subscribers_job`, `get_backup_dir`, `backup_to_drive` | SQLite (6 bảng: signals, money_flow, bot_state, bot_subscribers, ml_samples, anomaly_alerts) + thu thập subscriber bot đích qua getUpdates + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
+| 3. Lưu trữ | `init_db` (kèm migrate + DDL ML), `insert_db`, `get_state`, `set_state`, `_upsert_subscriber`/`get_subscribers`/`remove_subscriber`/`_is_blocked`/`block_subscriber`/`unblock_subscriber`/`get_blocklist`, `_poll_subscribers_worker`/`poll_subscribers_job`, `get_backup_dir`, `backup_to_drive` | SQLite (7 bảng: signals, money_flow, bot_state, bot_subscribers, bot_blocklist, ml_samples, anomaly_alerts) + thu thập/chặn subscriber bot đích qua getUpdates + trạng thái đọc bù/gửi bù + copy DB sang Google Drive (fallback Desktop khi ổ G: chưa mount) |
 | 4. Báo cáo | `generate_report` | Tổng hợp dòng tiền, 🏆 top 1-2 kèo điểm cao nhất (kèm Entry/SL/TP), các kèo Hoa Hậu khác xếp theo điểm, kèo rác trong ngày |
-| 5. Gác cổng | `fmt_price`, `compute_score`, `get_today_rank`, `format_trade_plan`, `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 3 bước (kỹ thuật → vĩ mô/phái sinh → chấm điểm & xếp hạng) + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test`, `/subs`, `/unsub` |
+| 5. Gác cổng | `fmt_price`, `compute_score`, `get_today_rank`, `format_trade_plan`, `check_and_evaluate`, `process_source_message`, `main_handler`, `command_handler` | Lọc kèo 3 bước (kỹ thuật → vĩ mô/phái sinh → chấm điểm & xếp hạng) + parse 4 định dạng (chỉ từ bot nguồn, dùng chung cho real-time & đọc bù) + lệnh `/stats`, `/backup`, `/test`, `/subs`, `/unsub`, `/resub`, `/blocked` |
 | 5.5. ML Shadow | `_label_worker`, `label_pending_samples_job`, `radar_scan_job`, `build_ml_status` (+ module ngoài: `ml_features`, `ml_predict`, `ml_radar`) | Chấm kết quả kèo live, radar coin lạ, lệnh `/ml` `/radar`; khối dự đoán nằm trong `check_and_evaluate` BƯỚC 3.5 |
 | 6. Khởi chạy | `catch_up_source_messages`, `_last_due_report_time`, `catch_up_missed_report`, `auto_send_report`, `main` | Đọc bù tin lỡ + gửi bù báo cáo lúc khởi động, APScheduler cron jobs, vòng lặp chính |
 

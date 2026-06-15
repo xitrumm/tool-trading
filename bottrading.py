@@ -325,6 +325,10 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS bot_subscribers (
         bot_id TEXT, chat_id INTEGER, name TEXT, first_seen TEXT,
         PRIMARY KEY (bot_id, chat_id))''')
+    # Blocklist: người bị /unsub → KHÔNG bao giờ poll thêm lại (trừ khi /resub)
+    c.execute('''CREATE TABLE IF NOT EXISTS bot_blocklist (
+        bot_id TEXT, chat_id INTEGER, ts TEXT,
+        PRIMARY KEY (bot_id, chat_id))''')
     # Migrate DB cũ: thêm cột điểm + trade plan cho bảng signals (đã có thì bỏ qua)
     for col in ('score REAL', 'entry REAL', 'stoploss REAL', 'tp1 REAL', 'tp2 REAL'):
         try: c.execute(f'ALTER TABLE signals ADD COLUMN {col}')
@@ -371,8 +375,24 @@ def set_state(key, value):
         conn.close()
     except Exception: pass
 
+def _is_blocked(bot_id, chat_id):
+    """True nếu chat_id đã bị /unsub khỏi bot này (nằm trong blocklist)."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("SELECT 1 FROM bot_blocklist WHERE bot_id=? AND chat_id=?", (bot_id, chat_id))
+        row = c.fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
+
 def _upsert_subscriber(bot_id, chat_id, name):
-    """Thêm/cập nhật 1 người đăng ký của bot. Trả True nếu là người MỚI."""
+    """Thêm/cập nhật 1 người đăng ký của bot. Trả True nếu là người MỚI.
+    Người trong blocklist (đã /unsub) bị bỏ qua hoàn toàn — không bao giờ poll thêm lại."""
+    if _is_blocked(bot_id, chat_id):
+        return False
     try:
         init_db()
         conn = sqlite3.connect('trading_memory.db')
@@ -410,6 +430,43 @@ def remove_subscriber(bot_id, chat_id):
         conn = sqlite3.connect('trading_memory.db')
         c = conn.cursor()
         c.execute("DELETE FROM bot_subscribers WHERE bot_id=? AND chat_id=?", (bot_id, chat_id))
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+def block_subscriber(bot_id, chat_id):
+    """/unsub: gỡ khỏi subscriber + ghi blocklist để getUpdates KHÔNG poll thêm lại."""
+    remove_subscriber(bot_id, chat_id)
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("INSERT OR REPLACE INTO bot_blocklist (bot_id, chat_id, ts) VALUES (?,?,?)",
+                  (bot_id, chat_id, datetime.datetime.now(VN_TZ).isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception: pass
+
+def get_blocklist(bot_id):
+    """Danh sách (chat_id, ts) đang bị chặn của bot này."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("SELECT chat_id, ts FROM bot_blocklist WHERE bot_id=?", (bot_id,))
+        rows = c.fetchall()
+        conn.close()
+        return rows
+    except Exception:
+        return []
+
+def unblock_subscriber(bot_id, chat_id):
+    """/resub: bỏ khỏi blocklist để người đó được phép đăng ký lại (qua /start)."""
+    try:
+        init_db()
+        conn = sqlite3.connect('trading_memory.db')
+        c = conn.cursor()
+        c.execute("DELETE FROM bot_blocklist WHERE bot_id=? AND chat_id=?", (bot_id, chat_id))
         conn.commit()
         conn.close()
     except Exception: pass
@@ -865,12 +922,25 @@ async def command_handler(event):
                     lines.append(f"• {label}: {len(subs)} người\n{who}")
                 else:
                     lines.append(f"• {label}: 0 người — (chưa có ai; nhờ người tạo bot nhắn /start khi tool đang chạy)")
-            lines.append("\nℹ️ Gỡ 1 người: /unsub <tên_bot hoặc bot_id> <chat_id>")
+            lines.append("\nℹ️ Gỡ vĩnh viễn: /unsub <bot> <chat_id> | Cho phép lại: /resub <bot> <chat_id> | Xem chặn: /blocked")
             await event.reply("👥 **NGƯỜI ĐĂNG KÝ THEO BOT:**\n" + "\n".join(lines))
-        elif text.startswith('/unsub'):
+        elif text == '/blocked':
+            lines = []
+            for token, label in TARGET_BOT_TOKENS:
+                blocked = get_blocklist(token.split(':', 1)[0])
+                if blocked:
+                    who = '\n'.join(f"   - {c} (chặn lúc {ts[:16].replace('T', ' ')})" for c, ts in blocked)
+                    lines.append(f"• {label}: {len(blocked)} bị chặn\n{who}")
+                else:
+                    lines.append(f"• {label}: 0 bị chặn")
+            lines.append("\nℹ️ Bỏ chặn: /resub <bot> <chat_id>")
+            await event.reply("🚫 **DANH SÁCH BỊ CHẶN:**\n" + "\n".join(lines))
+        elif text.startswith('/unsub') or text.startswith('/resub'):
+            is_unsub = text.startswith('/unsub')
+            cmd = '/unsub' if is_unsub else '/resub'
             parts = (event.raw_text or '').split()
             if len(parts) != 3:
-                await event.reply("Cú pháp: /unsub <tên_bot hoặc bot_id> <chat_id>\nVí dụ: /unsub xitrumm 6342103299 (gõ /subs để xem chat_id)")
+                await event.reply(f"Cú pháp: {cmd} <tên_bot hoặc bot_id> <chat_id>\nVí dụ: {cmd} xitrumm 6342103299 (gõ /subs để xem chat_id)")
                 return
             _, bot_arg, chat_arg = parts
             bot_id = label_found = None
@@ -887,11 +957,12 @@ async def command_handler(event):
             except ValueError:
                 await event.reply("❌ chat_id phải là số. Gõ /subs để xem chat_id.")
                 return
-            if cid not in [c for c, _ in get_subscribers(bot_id)]:
-                await event.reply(f"⚠️ {cid} không nằm trong subscriber của {label_found}.")
-                return
-            remove_subscriber(bot_id, cid)
-            await event.reply(f"🗑️ Đã gỡ {cid} khỏi subscriber của {label_found}. (Người này sẽ chỉ quay lại nếu /start hoặc nhắn bot lần nữa)")
+            if is_unsub:
+                block_subscriber(bot_id, cid)   # gỡ + chặn poll thêm lại
+                await event.reply(f"🚫 Đã gỡ & CHẶN {cid} khỏi {label_found}. Người này sẽ KHÔNG được thêm lại dù có nhắn bot — gõ /resub {label_found} {cid} để cho phép lại.")
+            else:
+                unblock_subscriber(bot_id, cid)   # bỏ chặn; họ /start lại sẽ được đăng ký
+                await event.reply(f"✅ Đã bỏ chặn {cid} ở {label_found}. Người này /start lại bot sẽ được nhận tin trở lại.")
     except Exception as e: pass
 
 # ==========================================
