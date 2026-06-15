@@ -113,7 +113,7 @@ Watchlist Mới thêm:
 📥 Entry: xx - SL: xx (-xx%) - TP1: xx (+xx%) | TP2: xx (+xx%)
 ```
 
-**4. File Excel/CSV đính kèm**: cần có cột chứa chữ `SYMBOL` hoặc `COIN`, và cột chứa chữ `PRIORITY` hoặc `SCORE` (không phân biệt hoa thường). Mọi dòng có điểm **> 70** sẽ được ghi `RAW_EXCEL` và **đánh giá NGAY**. File tạm `temp_data.xlsx` tự xóa sau xử lý.
+**4. File Excel/CSV đính kèm**: cần có cột chứa chữ `SYMBOL` hoặc `COIN`, và cột chứa chữ `PRIORITY` hoặc `SCORE` (không phân biệt hoa thường). Mọi dòng có điểm **> 70** sẽ được ghi `RAW_EXCEL` và **đánh giá NGAY**. File tạm `temp_data.xlsx` tự xóa sau xử lý. Nếu file có thêm cột chứa chữ `TIMEFRAME` (hoặc tên đúng `TF`), giá trị timeframe của từng dòng (chuẩn hóa hoa, vd `4h`→`4H`, `1d`→`1D`) được truyền qua `check_and_evaluate(..., extra_tf=...)` và **chỉ** gắn vào cuối dòng stats của tin broadcast tức thời (`... | TF: 4H`) — **KHÔNG** lưu DB nên `/stats` và báo cáo định kỳ 07:00/16:00 không hiển thị TF. Các nguồn khác (text/watchlist/money-flow) không có dòng `TF:` (`extra_tf` mặc định `None`).
 
 ### Logic lọc kèo (Người Gác Cổng V6 — `check_and_evaluate`)
 
@@ -148,7 +148,7 @@ Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY (mỗi bot đích tự
 theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
 ```
 
-**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm):
+**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm; **riêng kèo từ Excel** có cột timeframe thì dòng stats cuối được nối thêm ` | TF: 4H` — chỉ trong tin broadcast này, không vào DB/`/stats`/báo cáo định kỳ):
 
 Kèo thường:
 ```

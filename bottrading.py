@@ -651,7 +651,7 @@ def format_trade_plan(tech):
     return (f"📥 Entry: {fmt_price(entry)} - SL: {fmt_price(sl)} ({(sl/entry - 1)*100:.1f}%) - "
             f"TP1: {fmt_price(tp1)} (+{(tp1/entry - 1)*100:.1f}%) | TP2: {fmt_price(tp2)} (+{(tp2/entry - 1)*100:.1f}%)")
 
-async def check_and_evaluate(coin, now, force_urgent=False, source=""):
+async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=None):
     try:
         conn = sqlite3.connect('trading_memory.db')
         c = conn.cursor()
@@ -740,10 +740,13 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             except Exception as e:
                 print(f"   ⚠️ Khối ML shadow lỗi (bỏ qua, kèo vẫn phát bình thường): {e}")
 
+            # TF (kèo từ Excel) CHỈ gắn vào tin broadcast tức thời — KHÔNG lưu DB
+            # nên /stats và báo cáo 07:00/16:00 (đọc từ DB) sẽ không hiển thị TF.
+            stats_line = stats_info + (f" | TF: {extra_tf}" if extra_tf else "")
             msg = (f"{label}\n"
                    f"💯 Điểm: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
                    f"{format_trade_plan(tech)}\n"
-                   f"{stats_info}")
+                   f"{stats_line}")
             if is_top:
                 msg = f"🏆🏆🏆 TOP PICK 🏆🏆🏆\n{msg}"
             await broadcast_to_bots(msg)
@@ -792,15 +795,17 @@ async def process_source_message(message):
                     df.columns = [str(c).strip().upper() for c in df.columns]
                     score_col = next((c for c in df.columns if 'PRIORITY' in c or 'SCORE' in c), None)
                     coin_col = next((c for c in df.columns if 'SYMBOL' in c or 'COIN' in c), None)
+                    tf_col = next((c for c in df.columns if 'TIMEFRAME' in c or c == 'TF'), None)
                     if score_col and coin_col:
                         df[score_col] = pd.to_numeric(df[score_col], errors='coerce')
                         top_coins = df[df[score_col] > 70]
                         if not top_coins.empty:
                             for _, row in top_coins.iterrows():
                                 raw_coin = str(row[coin_col]).upper().replace('/USDT', '').strip()
+                                tf_val = str(row[tf_col]).strip().upper() if tf_col and pd.notna(row[tf_col]) else None
                                 insert_db('signals', (now, raw_coin, "excel", "RAW_EXCEL"),
                                           columns=('date', 'coin', 'timeframe', 'type'))
-                                await check_and_evaluate(raw_coin, now, force_urgent=True, source=f"EXCEL_SCORE_{row[score_col]}")
+                                await check_and_evaluate(raw_coin, now, force_urgent=True, source=f"EXCEL_SCORE_{row[score_col]}", extra_tf=tf_val)
                 except Exception as e: pass
                 finally:
                     if os.path.exists(file_path): os.remove(file_path)
