@@ -144,11 +144,12 @@ Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY (mỗi bot đích tự
 theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
 ```
 
-**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng đầu):
+**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm):
 
 Kèo thường:
 ```
-✅ KÈO THƯỜNG: XPL - Điểm: 60/100 (hạng 5 hôm nay)
+✅ KÈO THƯỜNG: XPL
+💯 Điểm: 60/100 (hạng 5 hôm nay)
 📥 Entry: 0.086100 - SL: 0.077194 (-10.3%) - TP1: 0.099459 (+15.5%) | TP2: 0.112818 (+31.0%)
 RSI: 53 | L/S: 0.75 | FR: 0.0050%
 ```
@@ -156,7 +157,8 @@ RSI: 53 | L/S: 0.75 | FR: 0.0050%
 Top pick (thêm header 🏆):
 ```
 🏆🏆🏆 TOP PICK 🏆🏆🏆
-✅ KÈO VIP: TRUMP - Điểm: 85/100 (hạng 1 hôm nay)
+✅ KÈO VIP: TRUMP
+💯 Điểm: 85/100 (hạng 1 hôm nay)
 📥 Entry: 2.1950 - SL: 2.0415 (-7.0%) - TP1: 2.4253 (+10.5%) | TP2: 2.6556 (+21.0%)
 RSI: 61 | L/S: 2.51 | FR: -0.1128%
 ```

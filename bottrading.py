@@ -683,7 +683,8 @@ async def check_and_evaluate(coin, now, force_urgent=False, source=""):
             except Exception as e:
                 print(f"   ⚠️ Khối ML shadow lỗi (bỏ qua, kèo vẫn phát bình thường): {e}")
 
-            msg = (f"{label} - Điểm: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
+            msg = (f"{label}\n"
+                   f"💯 Điểm: {score}/100 (hạng {rank} hôm nay){ml_line}\n"
                    f"{format_trade_plan(tech)}\n"
                    f"{stats_info}")
             if is_top:
