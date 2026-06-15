@@ -104,7 +104,7 @@ Watchlist Mới thêm:
 
 **3b. Cảnh báo nhanh Capital Convergence** (tin chứa `Capital Convergence`, dòng dạng `• ENJ — Capital Convergence: <lý do>`): NGOÀI luồng RAW_URGENT ở trên, mỗi coin còn đi qua `convergence_alert` — chạy TRƯỚC gác cổng để cảnh báo ngay lập tức:
 - Soi ngay khung 1H + 4H (`BinanceRadar.analyze_convergence` — 2 call klines), KHÔNG qua gác cổng EMA và KHÔNG ghi bảng `signals` (tránh cộng lượt nhắc ảo).
-- Điều kiện bắn: |biến động giá 24h| < 10% **HOẶC** giá còn nằm trong dải Bollinger MA99 (SMA99 ± 2σ) khung 1H — coin đã pump quá thì im lặng (chỉ log console).
+- Điều kiện bắn: |biến động giá 24h| < 10% **HOẶC** giá còn nằm trong dải Bollinger MA99 (SMA99 ± 2σ) khung 1H — coin đã pump quá thì im lặng (chỉ log console). **VÀ** TP1 phải ≥ +10% so với entry (`tp1/entry - 1 ≥ 10%`) — TP1 quá hẹp thì chỉ log console, KHÔNG cảnh báo.
 - Entry = giá đóng 1H mới nhất; TP1 = kháng cự (pivot high cửa sổ 3-3) 1H gần nhất phía trên, tối thiểu +1% (không có → +3%); TP2 = kháng cự 4H nằm trên TP1 (không có → +6%); SL = hỗ trợ (pivot low) 1H gần nhất phía dưới, tối thiểu −1%, hỗ trợ xa hơn −8% thì lùi về −5%.
 - Format broadcast (mỗi bot đích tự gửi qua Bot API):
 ```
@@ -124,6 +124,10 @@ Coin được nhắc ≥ 2 lần hôm nay (signals + money_flow)  HOẶC  nguồ
 BƯỚC 1 — Soi kỹ thuật (Binance Spot):
         Giá đóng 4H > EMA25(4H)  VÀ  Giá đóng 1D > EMA25(1D)?
         ├─ KHÔNG → ❌ Loại, ghi XIT_KY_THUAT
+        └─ CÓ ↓
+BƯỚC 1.5 — Gác TP1 tối thiểu:
+        TP1 (khung 4H) ≥ +10% so với entry?
+        ├─ KHÔNG → 🔇 Loại SỚM, ghi XIT_TP_HEP (không qua BƯỚC 2/3, không ghi ml_samples, KHÔNG broadcast)
         └─ CÓ ↓
 BƯỚC 2 — Quét vĩ mô + phái sinh (Binance Futures):
         • Thời tiết: BTC & ETH so với EMA25 ngày
@@ -145,7 +149,7 @@ BƯỚC 3 — Chấm điểm & xếp hạng (`compute_score` + `get_today_rank`)
         │
         ▼
 Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY (mỗi bot đích tự gửi qua Bot API tới DM chính chủ)
-theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT chỉ ghi DB, KHÔNG gửi đi)
+theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT / XIT_TP_HEP chỉ ghi DB, KHÔNG gửi đi)
 ```
 
 **Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm; **riêng kèo từ Excel** có cột timeframe thì dòng stats cuối được nối thêm ` | TF: 4H` — chỉ trong tin broadcast này, không vào DB/`/stats`/báo cáo định kỳ):
@@ -277,6 +281,7 @@ Các giá trị `type` trong bảng `signals`:
 | `BUY_HOA_HAU` | Pass kỹ thuật EMA 4H/1D (cột `timeframe` chứa chuỗi stats: RSI, L/S, FR) |
 | `BUY_HOA_HAU_VIP` | Pass kỹ thuật + đủ bonus vĩ mô |
 | `XIT_KY_THUAT` | Bị loại vì cấu trúc giá yếu (dưới EMA25) |
+| `XIT_TP_HEP` | Pass EMA nhưng TP1 (4H) < +10% → loại sớm, KHÔNG broadcast (chỉ đếm trong mục "kèo đã bỏ qua"; `timeframe` ghi `TP1+x.x%`) |
 | `RAW_RADAR` | Coin do radar ML phát hiện bất thường (tính 1 lượt nhắc, không tự chốt kèo) |
 
 Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (lọc `date LIKE 'YYYY-MM-DD%'`).

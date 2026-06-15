@@ -680,6 +680,20 @@ async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=
                           columns=('date', 'coin', 'timeframe', 'type'))
                 return
 
+            # --- GATE TP1: pass kỹ thuật nhưng TP1 quá hẹp (< +10%) → loại, KHÔNG broadcast ---
+            # Loại SỚM (trước BƯỚC 2/3): không tốn HTTP phái sinh, không chấm điểm/xếp hạng,
+            # không ghi ml_samples — nhất quán với cách XIT_KY_THUAT bị loại trước ML.
+            # Ghi type riêng XIT_TP_HEP để báo cáo đếm vào "kèo đã bỏ qua", KHÔNG lẫn kèo chốt.
+            tp1_pct = (tech['tp1'] / tech['entry'] - 1) * 100
+            if tp1_pct < 10:
+                print(f"   🔇 Loại {coin}: TP1 chỉ +{tp1_pct:.1f}% (< 10%) — ghi XIT_TP_HEP, KHÔNG phát.")
+                insert_db('signals',
+                          (now, coin, f"TP1+{tp1_pct:.1f}%", "XIT_TP_HEP",
+                           tech['entry'], tech['sl'], tech['tp1'], tech['tp2']),
+                          columns=('date', 'coin', 'timeframe', 'type',
+                                   'entry', 'stoploss', 'tp1', 'tp2'))
+                return
+
             # --- BƯỚC 2: QUÉT BENCHMARK & PHÁI SINH ---
             weather = radar.check_market_weather()
             ls_ratio, fr, oi = radar.spy_on_derivatives(f"{coin}USDT")
@@ -769,6 +783,10 @@ async def convergence_alert(coin, desc, now):
         print(f"   📊 Biến động 24h: {plan['change_24h']:+.1f}% | Trong dải BB MA99 1H: {'CÓ' if plan['in_bb'] else 'KHÔNG'}")
         if abs(plan['change_24h']) >= 10 and not plan['in_bb']:
             print(f"   ❌ {coin}: đã chạy {plan['change_24h']:+.1f}% và thoát dải BB — KHÔNG cảnh báo.")
+            return
+        tp1_pct = (plan['tp1'] / plan['entry'] - 1) * 100
+        if tp1_pct < 10:
+            print(f"   🔇 {coin}: TP1 chỉ +{tp1_pct:.1f}% (< 10%) — KHÔNG cảnh báo Convergence.")
             return
         msg = (f"👀Capital Convergence\n"
                f"✅{coin}: {desc or CONV_DEFAULT_DESC}\n"
