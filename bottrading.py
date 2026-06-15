@@ -807,6 +807,12 @@ async def process_source_message(message):
             doc = message.media.document
             mime_type = doc.mime_type
             if 'spreadsheetml' in mime_type or 'excel' in mime_type or 'csv' in mime_type:
+                # CHỈ lấy file có tên chứa 'signals_v4' — bot nguồn có thể gửi nhiều Excel,
+                # các file khác bỏ qua hoàn toàn (không tải về, không phân tích).
+                fname = (message.file.name or '') if message.file else ''
+                if 'signals_v4' not in fname.lower():
+                    print(f"[{now}] 📎 Bỏ qua file Excel '{fname}' — chỉ xử lý file chứa 'signals_v4'.")
+                    return
                 file_path = await message.download_media(file='temp_data.xlsx')
                 try:
                     df = pd.read_excel(file_path) if 'excel' in mime_type or 'spreadsheetml' in mime_type else pd.read_csv(file_path)
