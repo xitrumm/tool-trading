@@ -86,11 +86,13 @@ symbol: SOL/USDT | direction: BUY | timeframe: 4h
 ```
 → Ghi `RAW_SIGNAL`, cộng dồn đếm tín hiệu cho coin đó.
 
-**2. Dòng tiền luân chuyển** (bắt buộc dùng mũi tên `→` U+2192):
+**2. Dòng tiền luân chuyển** (tin **bắt buộc chứa header `SMART MONEY ROTATION`** — không phân biệt hoa thường, và dùng mũi tên `→` U+2192). Bắt **MỌI** cặp `X → Y` trong tin (không chỉ cặp đầu):
 ```
+SMART MONEY ROTATION
+TON → NEAR
 BTC → SOL
 ```
-→ Ghi vào bảng `money_flow`, coin đích (SOL) được cộng đếm và đánh giá.
+→ Mỗi cặp ghi 1 dòng vào bảng `money_flow`, coin đích (NEAR, SOL) được cộng đếm và đánh giá. Tin có mũi tên nhưng **KHÔNG** có header `SMART MONEY ROTATION` → bỏ qua hoàn toàn.
 
 **3. Watchlist đột biến** (tin nhắn chứa cả chữ `Watchlist` và `Mới thêm`, coin nằm sau dấu `•` và trước dấu `—` hoặc `-`):
 ```

@@ -823,12 +823,14 @@ async def process_source_message(message):
                           columns=('date', 'coin', 'timeframe', 'type'))
                 await check_and_evaluate(coin, now, force_urgent=True, source="WATCHLIST ĐỘT BIẾN")
 
-        flow_match = re.search(r'([A-Z0-9]+)\s*→\s*([A-Z0-9]+)', text)
-        if flow_match:
-            coin_from = flow_match.group(1).upper()
-            coin_to = flow_match.group(2).upper()
-            insert_db('money_flow', (now, coin_from, coin_to))
-            await check_and_evaluate(coin_to, now)
+        # Dòng tiền luân chuyển: CHỈ xử lý tin có header "SMART MONEY ROTATION",
+        # bắt MỌI cặp X → Y trong tin (mỗi coin đích được ghi & đánh giá riêng).
+        if 'smart money rotation' in text.lower():
+            for coin_from, coin_to in re.findall(r'([A-Z0-9]+)\s*→\s*([A-Z0-9]+)', text):
+                coin_from = coin_from.upper()
+                coin_to = coin_to.upper()
+                insert_db('money_flow', (now, coin_from, coin_to))
+                await check_and_evaluate(coin_to, now)
 
         sig_match = re.search(r'symbol:\s*([A-Z0-9]+)/USDT\s*\|\s*direction:\s*(BUY|SELL)\s*\|\s*timeframe:\s*([0-9a-z]+)', text, re.IGNORECASE)
         if sig_match:
