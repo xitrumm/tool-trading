@@ -103,20 +103,21 @@ MY_ID = None                                    # user-id chính chủ — gán 
 
 client = TelegramClient('megazord_session', API_ID, API_HASH)
 
-def _bot_api(token, method, params=None):
+def _bot_api(token, method, params=None, read_timeout=10):
     """Gọi 1 method Bot API (sendMessage/getMe/getUpdates...), trả dict JSON.
     KHÔNG raise — lỗi mạng trả {'ok': False, 'description': ...}.
 
     Tự RETRY tối đa 2 lần (tổng 3 lần thử) khi lỗi MẠNG TẠM THỜI (timeout/connection/5xx)
     với backoff 1s → 3s. KHÔNG retry lỗi vĩnh viễn (blocked/deactivated/chat not found...).
     Lỗi 429 (rate limit) thì chờ đúng `retry_after` Telegram trả về rồi thử lại.
-    timeout=(5,10): connect 5s, read 10s — Telegram khỏe phản hồi <1s, để dài chỉ kéo lỗi mạng."""
+    timeout=(connect 5s, read `read_timeout`s) — sendMessage để 10s (cần nhanh); getUpdates
+    truyền read_timeout dài hơn (30s) vì payload backlog có thể lớn, poll nền không gấp."""
     last = {"ok": False, "description": "lỗi không xác định"}
     backoffs = [1, 3]   # chờ trước retry lần 1, lần 2
     for attempt in range(3):
         try:
             r = requests.post(f"https://api.telegram.org/bot{token}/{method}",
-                              json=params or {}, timeout=(5, 10))
+                              json=params or {}, timeout=(5, read_timeout))
             data = r.json()
             # 429 rate limit → chờ đúng retry_after rồi thử lại (không tính vào backoff thường)
             if (not data.get('ok')) and r.status_code == 429:
@@ -503,10 +504,12 @@ def _poll_subscribers_worker(bots):
     for token, label in bots:
         bot_id = token.split(':', 1)[0]
         offset = get_state(f'gu_offset_{bot_id}')
-        params = {"timeout": 0, "allowed_updates": ["message"]}
+        # limit=100 cap số update/lần (giảm payload khi backlog lớn); read_timeout 30s vì
+        # lần poll đầu (chưa có offset) phải tải toàn bộ backlog ~24h — 10s có thể không đủ.
+        params = {"timeout": 0, "allowed_updates": ["message"], "limit": 100}
         if offset:
             params["offset"] = int(offset)
-        data = _bot_api(token, "getUpdates", params)
+        data = _bot_api(token, "getUpdates", params, read_timeout=30)
         if not data.get('ok'):
             out.append((label, 0, data.get('description', 'lỗi getUpdates')))
             continue
