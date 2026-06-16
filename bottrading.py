@@ -817,16 +817,31 @@ async def process_source_message(message):
                 try:
                     df = pd.read_excel(file_path) if 'excel' in mime_type or 'spreadsheetml' in mime_type else pd.read_csv(file_path)
                     df.columns = [str(c).strip().upper() for c in df.columns]
-                    score_col = next((c for c in df.columns if 'PRIORITY' in c or 'SCORE' in c), None)
+                    # Lấy chính xác cột PRIORITY_SCORE
+                    score_col = 'PRIORITY_SCORE' if 'PRIORITY_SCORE' in df.columns else None
                     coin_col = next((c for c in df.columns if 'SYMBOL' in c or 'COIN' in c), None)
                     tf_col = next((c for c in df.columns if 'TIMEFRAME' in c or c == 'TF'), None)
+                    signal_col = next((c for c in df.columns if 'SIGNAL' in c or 'DIRECTION' in c), None)
+                    ts_col = next((c for c in df.columns if 'TIMESTAMP' in c), None)
                     if score_col and coin_col:
                         df[score_col] = pd.to_numeric(df[score_col], errors='coerce')
-                        top_coins = df[df[score_col] > 70]
-                        if not top_coins.empty:
-                            for _, row in top_coins.iterrows():
-                                raw_coin = str(row[coin_col]).upper().replace('/USDT', '').strip()
-                                tf_val = str(row[tf_col]).strip().upper() if tf_col and pd.notna(row[tf_col]) else None
+                        sel = df[df[score_col] >= 70].copy()
+                        # Chỉ lấy BUY khi file có cột signal (file không có cột → xử lý hết như cũ)
+                        if signal_col:
+                            sel = sel[sel[signal_col].astype(str).str.strip().str.upper() == 'BUY']
+                        if not sel.empty:
+                            # Khử trùng theo (coin, timeframe) — giữ dòng timestamp mới nhất.
+                            # check_and_evaluate luôn phân tích live Binance (bỏ qua entry/TP trong
+                            # file) nên cùng 1 coin nhiều dòng chỉ tạo các tin gần như y hệt → gộp.
+                            sel['__coin'] = sel[coin_col].astype(str).str.upper().str.replace('/USDT', '', regex=False).str.strip()
+                            sel['__tf'] = sel[tf_col].astype(str).str.strip().str.upper() if tf_col else ''
+                            if ts_col:
+                                sel['__ts'] = pd.to_datetime(sel[ts_col], errors='coerce')
+                                sel = sel.sort_values('__ts', kind='stable')
+                            sel = sel.drop_duplicates(['__coin', '__tf'], keep='last')
+                            for _, row in sel.iterrows():
+                                raw_coin = row['__coin']
+                                tf_val = str(row[tf_col]).strip().upper() if (tf_col and pd.notna(row[tf_col])) else None
                                 insert_db('signals', (now, raw_coin, "excel", "RAW_EXCEL"),
                                           columns=('date', 'coin', 'timeframe', 'type'))
                                 await check_and_evaluate(raw_coin, now, force_urgent=True, source=f"EXCEL_SCORE_{row[score_col]}", extra_tf=tf_val)
