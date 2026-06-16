@@ -105,13 +105,37 @@ client = TelegramClient('megazord_session', API_ID, API_HASH)
 
 def _bot_api(token, method, params=None):
     """Gọi 1 method Bot API (sendMessage/getMe/getUpdates...), trả dict JSON.
-    KHÔNG raise — lỗi mạng trả {'ok': False, 'description': ...}."""
-    try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/{method}",
-                          json=params or {}, timeout=20)
-        return r.json()
-    except Exception as e:
-        return {"ok": False, "description": f"lỗi kết nối: {e}"}
+    KHÔNG raise — lỗi mạng trả {'ok': False, 'description': ...}.
+
+    Tự RETRY tối đa 2 lần (tổng 3 lần thử) khi lỗi MẠNG TẠM THỜI (timeout/connection/5xx)
+    với backoff 1s → 3s. KHÔNG retry lỗi vĩnh viễn (blocked/deactivated/chat not found...).
+    Lỗi 429 (rate limit) thì chờ đúng `retry_after` Telegram trả về rồi thử lại.
+    timeout=(5,10): connect 5s, read 10s — Telegram khỏe phản hồi <1s, để dài chỉ kéo lỗi mạng."""
+    last = {"ok": False, "description": "lỗi không xác định"}
+    backoffs = [1, 3]   # chờ trước retry lần 1, lần 2
+    for attempt in range(3):
+        try:
+            r = requests.post(f"https://api.telegram.org/bot{token}/{method}",
+                              json=params or {}, timeout=(5, 10))
+            data = r.json()
+            # 429 rate limit → chờ đúng retry_after rồi thử lại (không tính vào backoff thường)
+            if (not data.get('ok')) and r.status_code == 429:
+                wait = (data.get('parameters') or {}).get('retry_after', 1)
+                if attempt < 2:
+                    time.sleep(min(wait, 30))
+                    last = data
+                    continue
+            # 5xx (lỗi tạm phía Telegram) → coi như lỗi mạng, retry
+            if (not data.get('ok')) and r.status_code >= 500 and attempt < 2:
+                last = data
+                time.sleep(backoffs[attempt])
+                continue
+            return data   # thành công, hoặc lỗi vĩnh viễn (blocked/chat not found/400...) → trả ngay
+        except Exception as e:
+            last = {"ok": False, "description": f"lỗi kết nối: {e}"}
+            if attempt < 2:
+                time.sleep(backoffs[attempt])
+    return last
 
 def _send_via_bot(token, chat_id, text):
     """CHÍNH bot (token) tự gửi 1 tin tới chat_id. Plain text (không parse_mode) —
