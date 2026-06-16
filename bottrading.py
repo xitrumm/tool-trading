@@ -768,14 +768,17 @@ async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=
     except Exception as e: print("Lỗi soi chéo:", e)
 
 CONV_DEFAULT_DESC = "Nhiều nguồn vốn cùng chảy về 1 coin"
+MFI_DEFAULT_DESC = "Dòng tiền đột biến, MFI bứt phá kèm volume cao"
 
-async def convergence_alert(coin, desc, now):
-    """Cảnh báo NHANH cho tin Capital Convergence — bắn ngay khi đạt điều kiện,
+async def convergence_alert(coin, desc, now, title="👀Capital Convergence",
+                            default_desc=CONV_DEFAULT_DESC, log_tag="CAPITAL CONVERGENCE"):
+    """Cảnh báo NHANH cho tin Capital Convergence / MFI Breakout — bắn ngay khi đạt điều kiện,
     KHÔNG qua gác cổng EMA và KHÔNG ghi bảng signals (tránh cộng lượt nhắc ảo —
     luồng RAW_URGENT của Watchlist vẫn chạy song song như cũ).
-    Điều kiện bắn: |biến động 24h| < 10%  HOẶC  giá còn trong dải Bollinger MA99 1H."""
+    Điều kiện bắn: (|biến động 24h| < 10%  HOẶC  giá còn trong dải Bollinger MA99 1H) VÀ TP1 ≥ +10%.
+    `title`/`default_desc`/`log_tag` cho phép tái dụng cho nhiều loại tín hiệu (mặc định = Capital Convergence)."""
     try:
-        print(f"\n[{now}] 👀 CAPITAL CONVERGENCE: {coin} — soi nhanh khung 1H/4H...")
+        print(f"\n[{now}] 👀 {log_tag}: {coin} — soi nhanh khung 1H/4H...")
         plan = radar.analyze_convergence(f"{coin}USDT")
         if not plan:
             print(f"   ⚠️ {coin}: không lấy được dữ liệu Binance — bỏ qua cảnh báo nhanh.")
@@ -786,15 +789,15 @@ async def convergence_alert(coin, desc, now):
             return
         tp1_pct = (plan['tp1'] / plan['entry'] - 1) * 100
         if tp1_pct < 10:
-            print(f"   🔇 {coin}: TP1 chỉ +{tp1_pct:.1f}% (< 10%) — KHÔNG cảnh báo Convergence.")
+            print(f"   🔇 {coin}: TP1 chỉ +{tp1_pct:.1f}% (< 10%) — KHÔNG cảnh báo nhanh.")
             return
-        msg = (f"👀Capital Convergence\n"
-               f"✅{coin}: {desc or CONV_DEFAULT_DESC}\n"
+        msg = (f"{title}\n"
+               f"✅{coin}: {desc or default_desc}\n"
                f"{format_trade_plan(plan)}")
         await broadcast_to_bots(msg)
         print(f"   🚀 Đã bắn cảnh báo nhanh {coin} | {format_trade_plan(plan)}")
     except Exception as e:
-        print(f"   ⚠️ Lỗi cảnh báo Capital Convergence {coin}: {e}")
+        print(f"   ⚠️ Lỗi cảnh báo nhanh {coin}: {e}")
 
 async def process_source_message(message):
     """Xử lý 1 tin nhắn từ bot nguồn — dùng chung cho tin real-time và tin đọc bù lúc khởi động.
@@ -858,6 +861,17 @@ async def process_source_message(message):
                     r'•\s*([A-Za-z0-9]+)\s*[—\-–]\s*Capital\s+Convergence\s*:?\s*([^\n]*)',
                     text, re.IGNORECASE):
                 await convergence_alert(coin.strip().upper(), desc.strip(), now)
+
+        # Tin MFI Breakout → cảnh báo NHANH y hệt Capital Convergence (mục 3c), chỉ khác tiêu đề.
+        # Dạng dòng: "AI — MFI Breakout: <mô tả>" (coin đứng đầu, không cần dấu •).
+        if 'mfi breakout' in text.lower():
+            for coin, desc in re.findall(
+                    r'([A-Za-z0-9]+)\s*[—\-–]\s*MFI\s+Breakout\s*:?\s*([^\n]*)',
+                    text, re.IGNORECASE):
+                await convergence_alert(coin.strip().upper(), desc.strip(), now,
+                                        title="👀 MFI Breakout",
+                                        default_desc=MFI_DEFAULT_DESC,
+                                        log_tag="MFI BREAKOUT")
 
         if "Watchlist" in text and "Mới thêm" in text:
             urgent_coins = re.findall(r'•\s*(.*?)\s*[—\-]', text)
