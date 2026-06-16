@@ -120,7 +120,17 @@ Watchlist Mới thêm:
 📥 Entry: xx - SL: xx (-xx%) - TP1: xx (+xx%) | TP2: xx (+xx%)
 ```
 
-**4. File Excel/CSV đính kèm**: **CHỈ xử lý file có TÊN chứa `signals_v4`** (không phân biệt hoa thường — đọc qua `message.file.name`); bot nguồn gửi nhiều Excel thì các file khác bị bỏ qua hoàn toàn (không tải về, chỉ log `📎 Bỏ qua file Excel...`). File hợp lệ cần có cột chứa chữ `SYMBOL` hoặc `COIN`, và cột điểm đúng tên `PRIORITY_SCORE`. Chỉ lấy dòng `signal = BUY` (qua cột chứa `SIGNAL`/`DIRECTION`; file không có cột này thì lấy hết) **và** điểm **≥ 70**; các dòng trùng coin được **khử trùng theo (coin, timeframe), giữ dòng `timestamp` mới nhất** (cùng 1 coin xuất hiện nhiều dòng do khác chỉ báo/nến → chỉ phát 1 tin/(coin,timeframe), tránh broadcast lặp). Mỗi dòng còn lại sau khử trùng được ghi `RAW_EXCEL` và **đánh giá NGAY**. File tạm `temp_data.xlsx` tự xóa sau xử lý. Nếu file có thêm cột chứa chữ `TIMEFRAME` (hoặc tên đúng `TF`), giá trị timeframe của từng dòng (chuẩn hóa hoa, vd `4h`→`4H`, `1d`→`1D`) được truyền qua `check_and_evaluate(..., extra_tf=...)` và **chỉ** gắn vào cuối dòng stats của tin broadcast tức thời (`... | TF: 4H`) — **KHÔNG** lưu DB nên `/stats` và báo cáo định kỳ 07:00/16:00 không hiển thị TF. Các nguồn khác (text/watchlist/money-flow) không có dòng `TF:` (`extra_tf` mặc định `None`).
+**4. File Excel/CSV đính kèm**: **CHỈ xử lý file có TÊN chứa `signals_v4`** (không phân biệt hoa thường — đọc qua `message.file.name`); bot nguồn gửi nhiều Excel thì các file khác bị bỏ qua hoàn toàn (không tải về, chỉ log `📎 Bỏ qua file Excel...`). File hợp lệ cần có cột chứa chữ `SYMBOL` hoặc `COIN`, và cột điểm đúng tên `PRIORITY_SCORE`. Chỉ lấy dòng `signal = BUY` (qua cột chứa `SIGNAL`/`DIRECTION`; file không có cột này thì lấy hết) **và** điểm **≥ 70**; các dòng trùng coin được **khử trùng theo (coin, timeframe), giữ dòng `timestamp` mới nhất** (cùng 1 coin xuất hiện nhiều dòng do khác chỉ báo/nến → chỉ phát 1 tin/(coin,timeframe), tránh broadcast lặp). Mỗi dòng còn lại sau khử trùng được ghi `RAW_EXCEL` và **đánh giá NGAY**. File tạm `temp_data.xlsx` tự xóa sau xử lý.
+
+**NGAY sau khi tải file, TRƯỚC khi xử lý tín hiệu từng coin** (`broadcast_market_status`): nếu file Excel có sheet tên `Buy Sell Bar` (cột `timeframe`/`BUY`/`SELL`, mỗi khung 1 dòng vd `1d`/`4h`) → phát 1 tin tổng quan thị trường tới các bot đích, đếm BUY/SELL theo khung **1D rồi 4H**. Chỉ áp dụng file Excel (CSV bỏ qua vì không có nhiều sheet); lỗi đọc sheet này được bọc try riêng, **KHÔNG** chặn việc xử lý tín hiệu chính. Phần tín hiệu vẫn dùng `pd.read_excel` mặc định **sheet đầu (`Signals`)**. Dựa trên **khung 4H**, thêm 1 câu kết luận: nếu `BUY ≥ 2×SELL` → `Buy đang áp đảo, yên tâm giữ hàng`; nếu `SELL ≥ 2×BUY` → `Sell đang áp đảo, cực kỳ cẩn thận` (giữa 2 ngưỡng, hoặc thiếu số liệu 4H → không thêm câu). Format:
+```
+⚠️ Market Status:
+📊 1D: 🟢Buy/🔴Sell - 20/7
+📊 4H: 🟢Buy/🔴Sell - 529/104
+Buy đang áp đảo, yên tâm giữ hàng
+```
+
+Nếu file có thêm cột chứa chữ `TIMEFRAME` (hoặc tên đúng `TF`), giá trị timeframe của từng dòng (chuẩn hóa hoa, vd `4h`→`4H`, `1d`→`1D`) được truyền qua `check_and_evaluate(..., extra_tf=...)` và **chỉ** gắn vào cuối dòng stats của tin broadcast tức thời (`... | TF: 4H`) — **KHÔNG** lưu DB nên `/stats` và báo cáo định kỳ 07:00/16:00 không hiển thị TF. Các nguồn khác (text/watchlist/money-flow) không có dòng `TF:` (`extra_tf` mặc định `None`).
 
 ### Logic lọc kèo (Người Gác Cổng V6 — `check_and_evaluate`)
 

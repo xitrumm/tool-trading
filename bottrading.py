@@ -799,6 +799,56 @@ async def convergence_alert(coin, desc, now, title="👀Capital Convergence",
     except Exception as e:
         print(f"   ⚠️ Lỗi cảnh báo nhanh {coin}: {e}")
 
+async def broadcast_market_status(file_path, now):
+    """Đọc sheet 'Buy Sell Bar' trong file signals_v4 → broadcast tổng quan thị trường
+    (đếm BUY/SELL theo từng khung) NGAY, TRƯỚC khi xử lý tín hiệu từng coin.
+    Sheet dạng: cột timeframe | BUY | SELL, mỗi khung 1 dòng (vd 1d, 4h)."""
+    xl = pd.ExcelFile(file_path)
+    sheet = next((s for s in xl.sheet_names if s.strip().lower() == 'buy sell bar'), None)
+    if not sheet:
+        print(f"[{now}] ℹ️ File không có sheet 'Buy Sell Bar' — bỏ qua Market Status.")
+        return
+    df = pd.read_excel(xl, sheet_name=sheet)
+    df.columns = [str(c).strip().upper() for c in df.columns]
+    tf_col = next((c for c in df.columns if 'TIMEFRAME' in c or c == 'TF'), None)
+    buy_col = next((c for c in df.columns if c == 'BUY'), None)
+    sell_col = next((c for c in df.columns if c == 'SELL'), None)
+    if not (tf_col and buy_col and sell_col):
+        print(f"[{now}] ⚠️ Sheet 'Buy Sell Bar' thiếu cột timeframe/BUY/SELL — bỏ qua Market Status.")
+        return
+
+    def _to_int(v):
+        try: return int(float(v))
+        except Exception: return None
+
+    def _disp(v):
+        n = _to_int(v)
+        return str(n) if n is not None else str(v).strip()
+
+    counts = {}   # tf (chuẩn hóa hoa) -> (buy_raw, sell_raw)
+    for _, row in df.iterrows():
+        tf = str(row[tf_col]).strip().upper()
+        if tf and tf != 'NAN':
+            counts[tf] = (row[buy_col], row[sell_col])
+
+    lines = ["⚠️ Market Status:"]
+    for tf in ('1D', '4H'):   # giữ đúng thứ tự 1D rồi 4H như format yêu cầu
+        if tf in counts:
+            b, s = counts[tf]
+            lines.append(f"📊 {tf}: 🟢Buy/🔴Sell - {_disp(b)}/{_disp(s)}")
+
+    # Kết luận theo khung 4H: áp đảo khi 1 phía gấp >= 2 lần phía còn lại
+    bi, si = (_to_int(counts['4H'][0]), _to_int(counts['4H'][1])) if '4H' in counts else (None, None)
+    if bi is not None and si is not None:
+        if bi > 0 and bi >= 2 * si:
+            lines.append("Buy đang áp đảo, yên tâm giữ hàng")
+        elif si > 0 and si >= 2 * bi:
+            lines.append("Sell đang áp đảo, cực kỳ cẩn thận")
+
+    if len(lines) > 1:
+        await broadcast_to_bots("\n".join(lines))
+        print(f"[{now}] 🚀 Đã broadcast Market Status: {counts}")
+
 async def process_source_message(message):
     """Xử lý 1 tin nhắn từ bot nguồn — dùng chung cho tin real-time và tin đọc bù lúc khởi động.
     Mốc thời gian lấy theo giờ GỬI của tin (đổi sang giờ VN) để tin đọc bù vẫn đếm đúng ngày."""
@@ -817,6 +867,13 @@ async def process_source_message(message):
                     print(f"[{now}] 📎 Bỏ qua file Excel '{fname}' — chỉ xử lý file chứa 'signals_v4'.")
                     return
                 file_path = await message.download_media(file='temp_data.xlsx')
+                # Broadcast tổng quan thị trường (sheet 'Buy Sell Bar') NGAY, TRƯỚC khi xử lý tín hiệu.
+                # Chỉ với file Excel (CSV không có nhiều sheet); lỗi ở đây KHÔNG được chặn xử lý tín hiệu.
+                if 'excel' in mime_type or 'spreadsheetml' in mime_type:
+                    try:
+                        await broadcast_market_status(file_path, now)
+                    except Exception as e:
+                        print(f"[{now}] ⚠️ Bỏ qua Market Status (lỗi đọc sheet Buy Sell Bar): {e}")
                 try:
                     df = pd.read_excel(file_path) if 'excel' in mime_type or 'spreadsheetml' in mime_type else pd.read_csv(file_path)
                     df.columns = [str(c).strip().upper() for c in df.columns]
