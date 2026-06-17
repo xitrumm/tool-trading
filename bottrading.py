@@ -394,10 +394,14 @@ def _is_blocked(bot_id, chat_id):
         return False
 
 def _upsert_subscriber(bot_id, chat_id, name):
-    """Thêm/cập nhật 1 người đăng ký của bot. Trả True nếu là người MỚI.
-    Người trong blocklist (đã /unsub) bị bỏ qua hoàn toàn — không bao giờ poll thêm lại."""
+    """Thêm/cập nhật 1 người đăng ký của bot. Trả trạng thái:
+      'new'     — vừa thêm mới
+      'exists'  — đã có sẵn (cập nhật tên)
+      'blocked' — nằm trong blocklist (đã /unsub) → bỏ qua, KHÔNG bao giờ thêm lại
+      'error'   — lỗi ghi DB (vd SQLite bị lock) → KHÔNG được nhảy offset, để poll sau đọc lại
+    Phân biệt 'error' rất quan trọng: nếu nuốt lỗi rồi vẫn nhảy offset thì update /start mất luôn."""
     if _is_blocked(bot_id, chat_id):
-        return False
+        return 'blocked'
     try:
         init_db()
         conn = sqlite3.connect('trading_memory.db')
@@ -411,9 +415,9 @@ def _upsert_subscriber(bot_id, chat_id, name):
             c.execute("UPDATE bot_subscribers SET name=? WHERE bot_id=? AND chat_id=?", (name, bot_id, chat_id))
         conn.commit()
         conn.close()
-        return is_new
+        return 'new' if is_new else 'exists'
     except Exception:
-        return False
+        return 'error'
 
 def get_subscribers(bot_id):
     """Danh sách (chat_id, name) đã đăng ký bot này."""
@@ -494,7 +498,7 @@ def _poll_subscribers_worker(bots):
             out.append((label, 0, data.get('description', 'lỗi getUpdates')))
             continue
         updates = data.get('result', [])
-        new, max_uid = 0, (int(offset) - 1 if offset else None)
+        new, had_error, max_uid = 0, False, (int(offset) - 1 if offset else None)
         for upd in updates:
             uid = upd.get('update_id', 0)
             max_uid = uid if max_uid is None else max(max_uid, uid)
@@ -503,11 +507,15 @@ def _poll_subscribers_worker(bots):
                 name = (chat.get('username')
                         or ' '.join(x for x in [chat.get('first_name'), chat.get('last_name')] if x)
                         or str(chat['id']))
-                if _upsert_subscriber(bot_id, int(chat['id']), name):
+                st = _upsert_subscriber(bot_id, int(chat['id']), name)
+                if st == 'new':
                     new += 1
-        if updates and max_uid is not None:
-            set_state(f'gu_offset_{bot_id}', max_uid + 1)   # xác nhận đã đọc, lần sau lấy update mới
-        out.append((label, new, None))
+                elif st == 'error':
+                    had_error = True   # ghi DB lỗi → KHÔNG nhảy offset, để poll sau đọc lại update này
+        # Chỉ xác nhận (nhảy offset) khi không có update nào ghi DB lỗi — tránh mất /start vĩnh viễn
+        if updates and max_uid is not None and not had_error:
+            set_state(f'gu_offset_{bot_id}', max_uid + 1)
+        out.append((label, new, "ghi DB lỗi, giữ offset để đọc lại" if had_error else None))
     return out
 
 async def poll_subscribers_job():
@@ -898,12 +906,36 @@ async def process_source_message(message):
 
         if not text: return
 
+        # --- HỦY coin "đổi sang RS Divergence" (mục "Cập nhật tín hiệu") ---
+        # Coin đã đổi sang RS Divergence → BỎ QUA, không phân tích ở 3 luồng tức thời bên dưới
+        # (Watchlist / Capital Convergence / MFI Breakout); đồng thời xóa RAW_URGENT đã ghi hôm
+        # nay (kể cả từ tin trước) để không còn cộng lượt nhắc cho coin đó.
+        cancelled_coins = set()
+        if 'cập nhật tín hiệu' in text.lower():
+            for c in re.findall(r'([A-Za-z0-9]+)\s*[:：—\-–]\s*đổi\s+sang\s+RS\s+Divergence',
+                                text, re.IGNORECASE):
+                cancelled_coins.add(c.strip().upper())
+            if cancelled_coins:
+                print(f"[{now}] 🚫 Đổi sang RS Divergence → bỏ qua: {', '.join(sorted(cancelled_coins))}")
+                try:
+                    conn = sqlite3.connect('trading_memory.db')
+                    cur = conn.cursor()
+                    for c in cancelled_coins:
+                        cur.execute("DELETE FROM signals WHERE coin=? AND type='RAW_URGENT' AND date LIKE ?",
+                                    (c, f"{now[:10]}%"))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    print(f"   ⚠️ Lỗi xóa RAW_URGENT cho coin đổi sang RS Divergence: {e}")
+
         # Tin Capital Convergence → cảnh báo NHANH (chạy TRƯỚC gác cổng để kịp "ngay lập tức")
         if 'capital convergence' in text.lower():
             for coin, desc in re.findall(
                     r'•\s*([A-Za-z0-9]+)\s*[—\-–]\s*Capital\s+Convergence\s*:?\s*([^\n]*)',
                     text, re.IGNORECASE):
-                await convergence_alert(coin.strip().upper(), desc.strip(), now)
+                coin = coin.strip().upper()
+                if coin in cancelled_coins: continue
+                await convergence_alert(coin, desc.strip(), now)
 
         # Tin MFI Breakout → cảnh báo NHANH y hệt Capital Convergence (mục 3c), chỉ khác tiêu đề.
         # Dạng dòng: "AI — MFI Breakout: <mô tả>" (coin đứng đầu, không cần dấu •).
@@ -911,7 +943,9 @@ async def process_source_message(message):
             for coin, desc in re.findall(
                     r'([A-Za-z0-9]+)\s*[—\-–]\s*MFI\s+Breakout\s*:?\s*([^\n]*)',
                     text, re.IGNORECASE):
-                await convergence_alert(coin.strip().upper(), desc.strip(), now,
+                coin = coin.strip().upper()
+                if coin in cancelled_coins: continue
+                await convergence_alert(coin, desc.strip(), now,
                                         title="👀 MFI Breakout kèm volume cao",
                                         default_desc=MFI_DEFAULT_DESC,
                                         log_tag="MFI BREAKOUT")
@@ -920,6 +954,7 @@ async def process_source_message(message):
             urgent_coins = re.findall(r'•\s*(.*?)\s*[—\-]', text)
             for coin in urgent_coins:
                 coin = coin.strip().upper()
+                if coin in cancelled_coins: continue
                 insert_db('signals', (now, coin, "watchlist", "RAW_URGENT"),
                           columns=('date', 'coin', 'timeframe', 'type'))
                 await check_and_evaluate(coin, now, force_urgent=True, source="WATCHLIST ĐỘT BIẾN")
