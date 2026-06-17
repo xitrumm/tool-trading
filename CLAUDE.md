@@ -80,11 +80,12 @@ Gõ trong **Saved Messages** (chat với chính mình). Lệnh gõ ở chat khá
 
 ### Định dạng tin nhắn bot nhận diện (CHỈ đọc từ `SOURCE_BOT`)
 
-**1. Tín hiệu BUY dạng text** (chỉ ghi nhận direction BUY, bỏ qua SELL):
+**1. Tín hiệu BUY dạng text** (tin **bắt buộc chứa header `Deep Analysis`** — không phân biệt hoa thường; mỗi tín hiệu 1 dòng dạng `<số>. <COIN>/USDT [BUY]`, có thể kèm emoji đầu dòng). Bắt **MỌI** dòng trong tin, chỉ ghi nhận `[BUY]`, bỏ qua `[SELL]`:
 ```
-symbol: SOL/USDT | direction: BUY | timeframe: 4h
+🔍 Deep Analysis — 1 signals
+🟢 1. BANANA/USDT [BUY]
 ```
-→ Ghi `RAW_SIGNAL`, cộng dồn đếm tín hiệu cho coin đó.
+→ Mỗi coin BUY ghi `RAW_SIGNAL` (cột `timeframe` để `text`), cộng dồn đếm tín hiệu rồi đi qua gác cổng như mục "Logic lọc kèo" (KHÔNG force_urgent → cần coin nhắc ≥ 2 lần/ngày mới chốt kèo). Tin **KHÔNG** có header `Deep Analysis` → bỏ qua hoàn toàn.
 
 **2. Dòng tiền luân chuyển** (tin **bắt buộc chứa header `SMART MONEY ROTATION`** — không phân biệt hoa thường, và dùng mũi tên `→` U+2192). Bắt **MỌI** cặp `X → Y` trong tin (không chỉ cặp đầu):
 ```
@@ -92,7 +93,14 @@ SMART MONEY ROTATION
 TON → NEAR
 BTC → SOL
 ```
-→ Mỗi cặp ghi 1 dòng vào bảng `money_flow`, coin đích (NEAR, SOL) được cộng đếm và đánh giá. Tin có mũi tên nhưng **KHÔNG** có header `SMART MONEY ROTATION` → bỏ qua hoàn toàn.
+→ Mỗi cặp ghi 1 dòng vào bảng `money_flow`, coin đích (NEAR, SOL) được cộng đếm và đánh giá (`source="ROTATION:<coin_from>"`, **KHÔNG** force_urgent → chỉ chốt kèo khi coin đích gom đủ ≥ 2 lượt nhắc trong ngày + pass gác cổng). Tin có mũi tên nhưng **KHÔNG** có header `SMART MONEY ROTATION` → bỏ qua hoàn toàn. Kèo chốt từ luồng này broadcast với **nhãn riêng 2 dòng** (header + cặp `X → Y`), thay cho `KÈO VIP`/`KÈO THƯỜNG`:
+```
+⚡ SMART MONEY ROTATION
+💰 SCRT → CFG
+💯 Điểm: 60/100 (hạng 5 hôm nay)
+📥 Entry: 0.086100 - SL: 0.077194 (-10.3%) - TP1: 0.099459 (+15.5%) | TP2: 0.112818 (+31.0%)
+RSI: 53 | L/S: 0.75 | FR: 0.0050%
+```
 
 **3. Watchlist đột biến** (tin nhắn chứa cả chữ `Watchlist` và `Mới thêm`, coin nằm sau dấu `•` và trước dấu `—` hoặc `-`):
 ```
@@ -100,7 +108,13 @@ Watchlist Mới thêm:
 • SOL — volume tăng đột biến
 • AVAX - breakout
 ```
-→ Ghi `RAW_URGENT` và **đánh giá NGAY** (force_urgent, bỏ qua điều kiện ≥ 2 lần nhắc).
+→ Ghi `RAW_URGENT` và **đánh giá NGAY** (force_urgent, bỏ qua điều kiện ≥ 2 lần nhắc). Kèo chốt từ Watchlist broadcast với **nhãn riêng `Watchlist`** (thay cho `KÈO VIP`/`KÈO THƯỜNG`), icon vẫn theo loại thật (🌟 VIP / ✅ thường), và **không** nâng nhãn lên `KÈO VIP` dù là TOP PICK:
+```
+✅ Watchlist: XPL
+💯 Điểm: 60/100 (hạng 5 hôm nay)
+📥 Entry: 0.086100 - SL: 0.077194 (-10.3%) - TP1: 0.099459 (+15.5%) | TP2: 0.112818 (+31.0%)
+RSI: 53 | L/S: 0.75 | FR: 0.0050%
+```
 
 **3b. Cảnh báo nhanh Capital Convergence** (tin chứa `Capital Convergence`, dòng dạng `• ENJ — Capital Convergence: <lý do>`): NGOÀI luồng RAW_URGENT ở trên, mỗi coin còn đi qua `convergence_alert` — chạy TRƯỚC gác cổng để cảnh báo ngay lập tức:
 - Soi ngay khung 1H + 4H (`BinanceRadar.analyze_convergence` — 2 call klines), KHÔNG qua gác cổng EMA và KHÔNG ghi bảng `signals` (tránh cộng lượt nhắc ảo).
@@ -169,7 +183,7 @@ Kèo chốt (cả VIP lẫn Thường) → broadcast NGAY (mỗi bot đích tự
 theo format gọn 3 dòng bên dưới. (Kèo XIT_KY_THUAT / XIT_TP_HEP chỉ ghi DB, KHÔNG gửi đi)
 ```
 
-**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm; **riêng kèo từ Excel** có cột timeframe thì dòng stats cuối được nối thêm ` | TF: 4H` — chỉ trong tin broadcast này, không vào DB/`/stats`/báo cáo định kỳ):
+**Format tin kèo broadcast** (label: `🌟 KÈO VIP` khi đủ bonus vĩ mô / `✅ KÈO THƯỜNG` khi thiếu; riêng TOP PICK luôn được nâng nhãn thành `KÈO VIP` kể cả khi thiếu bonus vĩ mô, icon giữ theo loại thật 🌟/✅; **kèo từ Watchlist đột biến** dùng nhãn riêng `🌟/✅ Watchlist` — KHÔNG nâng nhãn lên `KÈO VIP` dù là TOP PICK; **kèo từ dòng tiền luân chuyển** dùng nhãn riêng 2 dòng `⚡ SMART MONEY ROTATION` + `💰 <từ> → <đích>`; dòng điểm `💯 Điểm: ...` nằm RIÊNG ngay dưới dòng nhãn; nếu có model ML thì dòng `🤖 ML: xx%...` chèn sau dòng điểm; **riêng kèo từ Excel** có cột timeframe thì dòng stats cuối được nối thêm ` | TF: 4H` — chỉ trong tin broadcast này, không vào DB/`/stats`/báo cáo định kỳ):
 
 Kèo thường:
 ```

@@ -740,8 +740,18 @@ async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=
             is_top = (rank == 1) or (rank == 2 and score >= 70)
 
             sig_type = "BUY_HOA_HAU_VIP" if is_vip else "BUY_HOA_HAU"
+            # Nhãn theo nguồn tín hiệu (ưu tiên nguồn đặc biệt trước nhãn VIP/Thường)
+            is_watchlist = "WATCHLIST" in source.upper()
+            is_rotation = source.upper().startswith("ROTATION:")
+            if is_rotation:
+                # Dòng tiền luân chuyển: nhãn riêng 2 dòng (header + cặp X → Y)
+                coin_from = source.split(":", 1)[1]
+                label = f"⚡ SMART MONEY ROTATION\n💰 {coin_from} → {coin}"
+            elif is_watchlist:
+                # Kèo từ Watchlist đột biến: nhãn riêng "Watchlist" (giữ icon theo loại thật 🌟/✅)
+                label = f"{'🌟' if is_vip else '✅'} Watchlist: {coin}"
             # Top pick được nâng nhãn lên KÈO VIP kể cả khi thiếu bonus vĩ mô
-            if is_vip or is_top:
+            elif is_vip or is_top:
                 label = f"{'🌟' if is_vip else '✅'} KÈO VIP: {coin}"
             else:
                 label = f"✅ KÈO THƯỜNG: {coin}"
@@ -972,15 +982,16 @@ async def process_source_message(message):
                 coin_from = coin_from.upper()
                 coin_to = coin_to.upper()
                 insert_db('money_flow', (now, coin_from, coin_to))
-                await check_and_evaluate(coin_to, now)
+                await check_and_evaluate(coin_to, now, source=f"ROTATION:{coin_from}")
 
-        sig_match = re.search(r'symbol:\s*([A-Z0-9]+)/USDT\s*\|\s*direction:\s*(BUY|SELL)\s*\|\s*timeframe:\s*([0-9a-z]+)', text, re.IGNORECASE)
-        if sig_match:
-            coin = sig_match.group(1).upper()
-            direction = sig_match.group(2).upper()
-            timeframe = sig_match.group(3).lower()
-            if direction == 'BUY':
-                insert_db('signals', (now, coin, timeframe, "RAW_SIGNAL"),
+        # Định dạng "Deep Analysis": tin có header "Deep Analysis", mỗi tín hiệu 1 dòng
+        # dạng "🟢 1. BANANA/USDT [BUY]" — bắt MỌI dòng, chỉ ghi nhận [BUY], bỏ qua [SELL].
+        if 'deep analysis' in text.lower():
+            for coin, direction in re.findall(r'\d+\.\s*([A-Z0-9]+)/USDT\s*\[(BUY|SELL)\]', text, re.IGNORECASE):
+                if direction.upper() != 'BUY':
+                    continue
+                coin = coin.upper()
+                insert_db('signals', (now, coin, 'text', "RAW_SIGNAL"),
                           columns=('date', 'coin', 'timeframe', 'type'))
                 await check_and_evaluate(coin, now)
 
