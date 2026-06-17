@@ -754,7 +754,7 @@ async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=
     except Exception as e: print("Lỗi soi chéo:", e)
 
 CONV_DEFAULT_DESC = "Nhiều nguồn vốn cùng chảy về 1 coin"
-MFI_DEFAULT_DESC = "Dòng tiền đột biến, MFI bứt phá kèm volume cao"
+MFI_DEFAULT_DESC = "Dòng tiền đột biến"
 
 async def convergence_alert(coin, desc, now, title="👀Capital Convergence",
                             default_desc=CONV_DEFAULT_DESC, log_tag="CAPITAL CONVERGENCE"):
@@ -912,7 +912,7 @@ async def process_source_message(message):
                     r'([A-Za-z0-9]+)\s*[—\-–]\s*MFI\s+Breakout\s*:?\s*([^\n]*)',
                     text, re.IGNORECASE):
                 await convergence_alert(coin.strip().upper(), desc.strip(), now,
-                                        title="👀 MFI Breakout",
+                                        title="👀 MFI Breakout kèm volume cao",
                                         default_desc=MFI_DEFAULT_DESC,
                                         log_tag="MFI BREAKOUT")
 
