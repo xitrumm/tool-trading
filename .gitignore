@@ -12,11 +12,6 @@ target_bots.txt
 trading_memory.db
 temp_data.xlsx
 
-# ML: model đã train + dataset artifact (tạo lại được bằng backfill/train)
-models/
-*.pkl
-ml_dataset*.csv
-
 # Python
 __pycache__/
 *.pyc
