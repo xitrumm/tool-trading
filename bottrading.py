@@ -6,12 +6,64 @@ import requests
 import pandas as pd
 import os
 import shutil
+import sys
 import asyncio
 from telethon import TelegramClient, events
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import pytz
 
 VN_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # mọi mốc thời gian của tool tính theo giờ Việt Nam
+
+# ==========================================
+# 0. GHI LOG CMD RA FILE (tee stdout/stderr)
+# ==========================================
+# Ghi lại MỌI thứ in ra console (print + traceback lỗi) vào file để tiện debug,
+# nhưng VẪN hiện trên cmd như cũ. File: logs/bottrading_YYYY-MM-DD.log (cùng thư mục tool).
+class _Tee:
+    """Ghi đồng thời ra console gốc và file log, kèm timestamp đầu mỗi dòng."""
+    def __init__(self, stream, logfile):
+        self.stream = stream          # console gốc (stdout/stderr)
+        self.logfile = logfile        # handle file log (mở chung cho cả 2 luồng)
+        self._at_line_start = True    # chỉ chèn timestamp ở đầu dòng mới
+
+    def write(self, text):
+        self.stream.write(text)       # vẫn in ra cmd như cũ
+        try:
+            for ch in text:
+                if self._at_line_start and ch != '\n':
+                    self.logfile.write('[' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + '] ')
+                    self._at_line_start = False
+                self.logfile.write(ch)
+                if ch == '\n':
+                    self._at_line_start = True
+            self.logfile.flush()      # flush ngay để không mất log khi tool bị kill
+        except Exception:
+            pass                      # lỗi ghi log không được làm sập tool
+
+    def flush(self):
+        self.stream.flush()
+        try:
+            self.logfile.flush()
+        except Exception:
+            pass
+
+def _setup_logging():
+    """Bật tee stdout/stderr -> file log theo ngày. Gọi sớm nhất có thể."""
+    try:
+        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, 'bottrading_' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d') + '.log')
+        # encoding utf-8 để giữ emoji/tiếng Việt; mở append để gộp nhiều lần chạy trong ngày
+        f = open(log_path, 'a', encoding='utf-8')
+        f.write('\n===== KHỞI ĐỘNG ' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + ' =====\n')
+        f.flush()
+        sys.stdout = _Tee(sys.stdout, f)
+        sys.stderr = _Tee(sys.stderr, f)
+    except Exception as e:
+        # không ghi được log thì vẫn chạy bot bình thường
+        print('⚠️ Không bật được ghi log ra file:', e)
+
+_setup_logging()
 
 # ==========================================
 # 1. CẤU HÌNH BỘ NÃO

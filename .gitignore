@@ -12,6 +12,9 @@ target_bots.txt
 trading_memory.db
 temp_data.xlsx
 
+# Log cmd ghi ra file — có thể chứa nội dung tin/kèo nhạy cảm
+logs/
+
 # Python
 __pycache__/
 *.pyc
