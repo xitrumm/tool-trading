@@ -184,7 +184,7 @@ async def broadcast_to_bots(message, tag=None):
     nhờ vậy log gửi không bị quy nhầm cho coin vừa bị loại khi nhiều task async chen nhau."""
     tag = (tag or (message.splitlines()[0] if message else ''))[:40]
     now = datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n[{now}]    📨 Bắt đầu phát tin: [{tag}]")
+    print(f"\n[{now}] 📨 Bắt đầu phát tin: [{tag}]")
     total_sent = 0
     for token, label in TARGET_BOT_TOKENS:
         bot_id = token.split(':', 1)[0]
