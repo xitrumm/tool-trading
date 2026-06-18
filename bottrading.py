@@ -125,10 +125,13 @@ def _send_via_bot(token, chat_id, text):
     data = _bot_api(token, "sendMessage", {"chat_id": chat_id, "text": text})
     return bool(data.get('ok')), str(data.get('description', '') or '')
 
-async def broadcast_to_bots(message):
+async def broadcast_to_bots(message, tag=None):
     """Mỗi bot đích RELAY tin tới TẤT CẢ người đã đăng ký bot đó (đã /start hoặc nhắn tin —
     chat_id thu thập qua getUpdates, lưu bảng bot_subscribers). Người block/xoá bot bị gỡ tự động.
-    Chạy gửi trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram."""
+    Chạy gửi trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram.
+    `tag` = nhãn nhận diện tin (coin/loại) in kèm log — không truyền thì lấy dòng đầu của tin;
+    nhờ vậy log gửi không bị quy nhầm cho coin vừa bị loại khi nhiều task async chen nhau."""
+    tag = (tag or (message.splitlines()[0] if message else ''))[:40]
     total_sent = 0
     for token, label in TARGET_BOT_TOKENS:
         bot_id = token.split(':', 1)[0]
@@ -151,8 +154,8 @@ async def broadcast_to_bots(message):
                 await asyncio.sleep(0.05)
             except Exception as e:
                 print(f"   ⚠️ Bot {label} → {name} lỗi: {e}")
-        print(f"   📤 Bot {label}: gửi {sent}/{len(subs)} người")
-    print(f"   📤 Tổng đã phát: {total_sent} tin")
+        print(f"   📤 [{tag}] Bot {label}: gửi {sent}/{len(subs)} người")
+    print(f"   📤 [{tag}] Tổng đã phát: {total_sent} tin")
 
 # ==========================================
 # 2. KHỐI VỆ TINH BINANCE (QUANT ENGINE V6)
@@ -684,7 +687,11 @@ async def check_and_evaluate(coin, now, force_urgent=False, source="", extra_tf=
 
             # --- BƯỚC 1: SOI KỸ THUẬT TOÀN DIỆN ---
             tech = radar.analyze_coin(f"{coin}USDT")
-            if not tech: return
+            if not tech:
+                # Thường gặp: coin chưa niêm yết Binance Spot (cặp USDT) → get_klines trả lỗi
+                # "Invalid symbol", analyze_coin nuốt exception trả None. In rõ để không "biến mất" im lặng.
+                print(f"   ⚠️ Bỏ qua {coin}: không lấy được dữ liệu Binance Spot ({coin}USDT) — có thể chưa niêm yết / sai symbol.")
+                return
 
             # In Log siêu chi tiết như 1 Quant Trader thực thụ
             print(f"   📊 [Kỹ thuật] Giá: {tech['price']:.4f} | EMA(7/25/99): ({tech['ema7']:.4f} / {tech['ema25']:.4f} / {tech['ema99']:.4f}) | RSI: {tech['rsi']:.2f}")
