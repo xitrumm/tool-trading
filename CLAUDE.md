@@ -23,7 +23,7 @@ SOURCE_BOT (1 bot nguồn) → lọc 3 bước + Binance → n bot đích relay 
 ## ⚠️ Trạng thái mã nguồn (QUAN TRỌNG)
 
 - **File chạy chính thức: `bottrading.py`** — mọi chỉnh sửa code thực hiện trên file này.
-- `bottrading.txt` là bản dán gốc (bị lặp 2 lần cùng một nội dung), chỉ giữ để tham khảo — KHÔNG sửa/chạy file này, có thể xóa khi không cần.
+- `bottrading.txt.old` là bản dán gốc (bị lặp 2 lần cùng một nội dung), chỉ giữ để tham khảo — KHÔNG sửa/chạy file này, có thể xóa khi không cần.
 - Cấu hình KHÔNG nằm trong code mà đọc từ 2 file ngoài (cùng thư mục với `bottrading.py`):
   - `config.txt` — `API_ID`, `API_HASH` (lấy từ https://my.telegram.org) và `SOURCE_BOT` (bot nguồn), dạng `KEY=VALUE`. **Chứa secret thật → đã gitignore.**
   - `target_bots.txt` — danh sách **token** bot đích (lấy từ @BotFather, dạng `123456789:ABC...`), mỗi dòng 1 token, dòng `#` là comment. Mỗi bot dùng token này để TỰ gửi report qua Bot API. **Chứa secret thật (token) → đã gitignore.**
@@ -263,7 +263,7 @@ Bảng `bot_state` (đọc/ghi qua `get_state`/`set_state`) gồm các key: `las
 
 **Giới hạn Telegram: getUpdates chỉ giữ update ~24h** → người /start từ lâu mà không nhắn lại sẽ KHÔNG bắt được; cần họ nhắn /start lại khi tool đang chạy. Mỗi token chỉ cho **1 nơi** đọc update → nếu bot đó đang đặt webhook hoặc có nơi khác đang getUpdates cùng token thì poll của tool lỗi (409/webhook, in `⚠️ Poll subscriber <tên>: ...` ra console mỗi 2 phút) và không đọc được /start của ai.
 
-5 cột cuối của `signals` chỉ có giá trị với kèo chốt (`BUY_HOA_HAU%`); tín hiệu thô để NULL. DB cũ tự migrate bằng `ALTER TABLE` trong `init_db` (lỗi "duplicate column" được nuốt). `insert_db` nhận tham số `columns` để insert đúng cột — mọi insert vào `signals` PHẢI truyền `columns`.
+5 cột cuối của `signals` chỉ có giá trị với kèo chốt (`BUY_HOA_HAU%`); tín hiệu thô để NULL. DB cũ tự migrate bằng `ALTER TABLE` trong `init_db` (lỗi "duplicate column" được nuốt). `init_db` chỉ dựng schema (CREATE/ALTER) **1 lần/tiến trình** nhờ cờ module `_DB_READY` — gần như mọi hàm DB gọi `init_db()` đầu vào nên không thể chạy ALTER mỗi lần (gọi `init_db(force=True)` nếu cần dựng lại). `insert_db` nhận tham số `columns` để insert đúng cột — mọi insert vào `signals` PHẢI truyền `columns`.
 
 Các giá trị `type` trong bảng `signals`:
 
@@ -299,11 +299,11 @@ Báo cáo `/stats` chỉ thống kê dữ liệu **trong ngày hiện tại** (l
 - **Đọc bù có thể trùng 1 tin**: `last_msg_id` ghi sau khi xử lý xong; nếu tool chết GIỮA LÚC đang xử lý 1 tin, tin đó sẽ được xử lý lại khi khởi động (coin bị đếm 2 lần) — chấp nhận được, hiếm gặp.
 - **Người nhận phải /start bot đích trước**: Bot API chỉ cho bot nhắn tới user đã từng bắt chuyện với nó. Tool KHÔNG tự biết ai đã /start — phải `getUpdates` gom `chat_id` rồi mới gửi được (xem "Cơ chế subscriber"). `broadcast_to_bots` lặp `TARGET_BOT_TOKENS` → với mỗi bot lấy `get_subscribers(bot_id)` rồi gọi `_send_via_bot` cho từng người trong `asyncio.to_thread` (không nghẽn event loop), giãn 0.05s/người; lỗi `blocked`/`deactivated`/`chat not found` → `remove_subscriber` gỡ người đó. Token là secret → chỉ in nhãn tên bot (`label`), KHÔNG bao giờ in token/`bot_id` đầy đủ ra log.
 - **Lệnh /stats, /backup, /test, /subs** bắt qua handler riêng `events.NewMessage(outgoing=True)`, và chỉ chạy khi `event.chat_id == MY_ID` (= **Saved Messages**, chat với chính mình). `MY_ID` lấy 1 lần lúc khởi động qua `client.get_me()`. Gõ lệnh ở chat khác → bị bỏ qua.
-- **Blocking trong async**: `check_and_evaluate` (đã chuyển sang `async def`) vẫn dùng `requests` đồng bộ bên trong → block event loop khi phân tích (mỗi coin tốn ~6-8 HTTP call). Nếu tối ưu, cân nhắc `asyncio.to_thread` hoặc `aiohttp`.
+- **Blocking trong async**: `check_and_evaluate` (đã chuyển sang `async def`) vẫn dùng `requests` đồng bộ bên trong → block event loop khi phân tích (mỗi coin tốn ~6-8 HTTP call). Mọi call Binance (`get_klines`, `spy_on_derivatives`) đã có `timeout=10` nên 1 kết nối treo bị chặn tối đa 10s/call thay vì đứng bot vô hạn — nhưng vẫn block event loop trong lúc chờ. Nếu tối ưu sâu hơn, cân nhắc `asyncio.to_thread` hoặc `aiohttp`.
 - **Nuốt lỗi**: nhiều chỗ `except: pass` / trả giá trị mặc định (`spy_on_derivatives` lỗi trả `1.0, 0.0, 0.0` — L/S=1.0 có thể làm sai điều kiện VIP). Khi debug nên thêm log trước. `analyze_coin` (`except: return None`) gộp chung "coin chưa niêm yết Binance Spot (symbol USDT không tồn tại → `get_klines` trả `Invalid symbol`)" lẫn lỗi mạng tạm thời — `check_and_evaluate` gặp `tech=None` thì in `⚠️ Bỏ qua <coin>: không lấy được dữ liệu Binance Spot...` rồi return (KHÔNG ghi DB, KHÔNG broadcast). Đây là lý do coin từ Excel có thể in header `🚨 KÍCH HOẠT MẮT THẦN V6` nhưng không có phân tích/loại bỏ.
-- **Binance API không cần key** (toàn endpoint public) nhưng có rate limit — tránh spam `analyze_coin`.
+- **Binance API không cần key** (toàn endpoint public) nhưng có rate limit — tránh spam `analyze_coin`. Mọi `requests.get` tới Binance đều đặt `timeout=10` (BẮT BUỘC vì chạy đồng bộ trong event loop — không có timeout thì 1 kết nối treo sẽ đứng cả bot); lỗi timeout được các `try/except` của `analyze_coin`/`analyze_convergence`/`check_market_weather`/`spy_on_derivatives` nuốt → trả `None`/giá trị mặc định.
 - **SQL dùng f-string cho ngày** trong `generate_report`/`check_and_evaluate` — chuỗi ngày do bot tự sinh nên không phải injection từ ngoài, nhưng giữ đúng format `YYYY-MM-DD HH:MM:SS` khi sửa.
-- `numpy` được import nhưng không dùng trực tiếp (pandas cần nó ngầm).
+- `numpy` KHÔNG còn được import trong code (đã gỡ vì không dùng trực tiếp) nhưng vẫn giữ trong `requirements.txt` vì pandas cần nó ngầm.
 - Coin symbol tự động ghép `USDT` khi gọi Binance (`{coin}USDT`) — chỉ hỗ trợ cặp USDT.
 - File config đọc bằng `encoding='utf-8-sig'` để chấp nhận cả file lưu từ Notepad (UTF-8 có BOM). ID số trong config tự chuyển sang `int` qua `_parse_entity` (Telethon yêu cầu ID là số nguyên).
 - Không commit: `config.txt` (chứa API_HASH thật), `target_bots.txt` (chứa TOKEN bot — secret), `megazord_session.session`, `trading_memory.db`, `temp_data.xlsx` — `.gitignore` đã chặn sẵn các file này.

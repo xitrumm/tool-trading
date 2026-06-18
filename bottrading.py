@@ -4,7 +4,6 @@ import datetime
 import time
 import requests
 import pandas as pd
-import numpy as np
 import os
 import shutil
 import asyncio
@@ -168,7 +167,9 @@ class BinanceRadar:
 
     def get_klines(self, symbol, interval, limit=100):
         url = f"{self.base_url}/klines?symbol={symbol}&interval={interval}&limit={limit}"
-        res = requests.get(url).json()
+        # timeout BẮT BUỘC: các call này chạy ĐỒNG BỘ trong event loop — Binance treo 1 kết nối
+        # mà không có timeout sẽ làm ĐỨNG toàn bộ bot (mất nghe nguồn + scheduler + heartbeat).
+        res = requests.get(url, timeout=10).json()
         df = pd.DataFrame(res, columns=['time', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'qav', 'num_trades', 'tbbav', 'tbqav', 'ignore'])
         for col in ('open', 'high', 'low', 'close'):
             df[col] = df[col].astype(float)
@@ -284,15 +285,15 @@ class BinanceRadar:
         try:
             # L/S Ratio
             url_ls = f"{self.data_url}/topLongShortAccountRatio?symbol={symbol}&period=1d&limit=1"
-            ls_ratio = float(requests.get(url_ls).json()[0]['longShortRatio'])
+            ls_ratio = float(requests.get(url_ls, timeout=10).json()[0]['longShortRatio'])
 
             # Funding Rate (Nhân 100 để ra % luôn cho dễ nhìn)
             url_fr = f"{self.fapi_url}/premiumIndex?symbol={symbol}"
-            funding_rate = float(requests.get(url_fr).json()['lastFundingRate']) * 100
+            funding_rate = float(requests.get(url_fr, timeout=10).json()['lastFundingRate']) * 100
 
             # Open Interest (OI)
             url_oi = f"{self.fapi_url}/openInterest?symbol={symbol}"
-            oi = float(requests.get(url_oi).json()['openInterest'])
+            oi = float(requests.get(url_oi, timeout=10).json()['openInterest'])
 
             return ls_ratio, funding_rate, oi
         except: return 1.0, 0.0, 0.0
@@ -326,7 +327,12 @@ radar = BinanceRadar()
 # ==========================================
 # 3. KHỐI LƯU TRỮ & ĐỒNG BỘ CLOUD (GIỮ NGUYÊN)
 # ==========================================
-def init_db():
+_DB_READY = False   # chỉ dựng schema (CREATE/ALTER) 1 lần/tiến trình — các hàm DB gọi init_db() rất nhiều
+
+def init_db(force=False):
+    global _DB_READY
+    if _DB_READY and not force:
+        return
     conn = sqlite3.connect('trading_memory.db')
     c = conn.cursor()
     c.execute('''CREATE TABLE IF NOT EXISTS signals (date TEXT, coin TEXT, timeframe TEXT, type TEXT)''')
@@ -346,6 +352,7 @@ def init_db():
         except sqlite3.OperationalError: pass
     conn.commit()
     conn.close()
+    _DB_READY = True
 
 def insert_db(table, data, columns=None):
     try:
@@ -969,7 +976,7 @@ async def process_source_message(message):
         # Dòng tiền luân chuyển: CHỈ xử lý tin có header "SMART MONEY ROTATION",
         # bắt MỌI cặp X → Y trong tin (mỗi coin đích được ghi & đánh giá riêng).
         if 'smart money rotation' in text.lower():
-            for coin_from, coin_to in re.findall(r'([A-Z0-9]+)\s*→\s*([A-Z0-9]+)', text):
+            for coin_from, coin_to in re.findall(r'([A-Za-z0-9]+)\s*→\s*([A-Za-z0-9]+)', text):
                 coin_from = coin_from.upper()
                 coin_to = coin_to.upper()
                 insert_db('money_flow', (now, coin_from, coin_to))
