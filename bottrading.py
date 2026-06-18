@@ -959,7 +959,7 @@ async def process_source_message(message):
                     text, re.IGNORECASE):
                 coin = coin.strip().upper()
                 if coin in cancelled_coins: continue
-                await convergence_alert(coin, desc.strip(), now,
+                await convergence_alert(coin, "", now,
                                         title="👀 MFI Breakout kèm volume cao",
                                         default_desc=MFI_DEFAULT_DESC,
                                         log_tag="MFI BREAKOUT")
