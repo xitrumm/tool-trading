@@ -19,46 +19,64 @@ VN_TZ = pytz.timezone('Asia/Ho_Chi_Minh')  # mọi mốc thời gian của tool 
 # ==========================================
 # Ghi lại MỌI thứ in ra console (print + traceback lỗi) vào file để tiện debug,
 # nhưng VẪN hiện trên cmd như cũ. File: logs/bottrading_YYYY-MM-DD.log (cùng thư mục tool).
+# File log mở dùng chung cho cả stdout & stderr; tách file tự động khi sang ngày mới.
+_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+_log_state = {'date': None, 'file': None}   # ngày của file đang mở + handle file
+
+def _log_file_for_now():
+    """Trả handle file log của NGÀY HÔM NAY, tự mở file mới khi qua ngày."""
+    today = datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d')
+    if _log_state['date'] != today:
+        # sang ngày mới (hoặc lần đầu): đóng file cũ, mở file ngày mới
+        if _log_state['file'] is not None:
+            try:
+                _log_state['file'].close()
+            except Exception:
+                pass
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        # encoding utf-8 để giữ emoji/tiếng Việt; mở append để gộp nhiều lần chạy trong ngày
+        f = open(os.path.join(_LOG_DIR, 'bottrading_' + today + '.log'), 'a', encoding='utf-8')
+        f.write('\n===== ' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + ' =====\n')
+        f.flush()
+        _log_state['date'] = today
+        _log_state['file'] = f
+    return _log_state['file']
+
 class _Tee:
     """Ghi đồng thời ra console gốc và file log, kèm timestamp đầu mỗi dòng."""
-    def __init__(self, stream, logfile):
+    def __init__(self, stream):
         self.stream = stream          # console gốc (stdout/stderr)
-        self.logfile = logfile        # handle file log (mở chung cho cả 2 luồng)
         self._at_line_start = True    # chỉ chèn timestamp ở đầu dòng mới
 
     def write(self, text):
         self.stream.write(text)       # vẫn in ra cmd như cũ
         try:
+            logfile = _log_file_for_now()   # tự tách file theo ngày ở MỖI lần ghi
             for ch in text:
                 if self._at_line_start and ch != '\n':
-                    self.logfile.write('[' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + '] ')
+                    logfile.write('[' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + '] ')
                     self._at_line_start = False
-                self.logfile.write(ch)
+                logfile.write(ch)
                 if ch == '\n':
                     self._at_line_start = True
-            self.logfile.flush()      # flush ngay để không mất log khi tool bị kill
+            logfile.flush()           # flush ngay để không mất log khi tool bị kill
         except Exception:
             pass                      # lỗi ghi log không được làm sập tool
 
     def flush(self):
         self.stream.flush()
         try:
-            self.logfile.flush()
+            if _log_state['file'] is not None:
+                _log_state['file'].flush()
         except Exception:
             pass
 
 def _setup_logging():
     """Bật tee stdout/stderr -> file log theo ngày. Gọi sớm nhất có thể."""
     try:
-        log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
-        os.makedirs(log_dir, exist_ok=True)
-        log_path = os.path.join(log_dir, 'bottrading_' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d') + '.log')
-        # encoding utf-8 để giữ emoji/tiếng Việt; mở append để gộp nhiều lần chạy trong ngày
-        f = open(log_path, 'a', encoding='utf-8')
-        f.write('\n===== KHỞI ĐỘNG ' + datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S') + ' =====\n')
-        f.flush()
-        sys.stdout = _Tee(sys.stdout, f)
-        sys.stderr = _Tee(sys.stderr, f)
+        _log_file_for_now()           # mở file ngày hôm nay ngay lúc khởi động
+        sys.stdout = _Tee(sys.stdout)
+        sys.stderr = _Tee(sys.stderr)
     except Exception as e:
         # không ghi được log thì vẫn chạy bot bình thường
         print('⚠️ Không bật được ghi log ra file:', e)
@@ -176,15 +194,18 @@ def _send_via_bot(token, chat_id, text):
     data = _bot_api(token, "sendMessage", {"chat_id": chat_id, "text": text})
     return bool(data.get('ok')), str(data.get('description', '') or '')
 
-async def broadcast_to_bots(message, tag=None):
+async def broadcast_to_bots(message, tag=None, announce=False):
     """Mỗi bot đích RELAY tin tới TẤT CẢ người đã đăng ký bot đó (đã /start hoặc nhắn tin —
     chat_id thu thập qua getUpdates, lưu bảng bot_subscribers). Người block/xoá bot bị gỡ tự động.
     Chạy gửi trong thread riêng (asyncio.to_thread) để không nghẽn event loop Telegram.
     `tag` = nhãn nhận diện tin (coin/loại) in kèm log — không truyền thì lấy dòng đầu của tin;
-    nhờ vậy log gửi không bị quy nhầm cho coin vừa bị loại khi nhiều task async chen nhau."""
+    nhờ vậy log gửi không bị quy nhầm cho coin vừa bị loại khi nhiều task async chen nhau.
+    `announce=True` → in thêm dòng MỞ ĐẦU '📨 Bắt đầu phát tin' (chỉ dùng cho BẢN TIN ĐIỂM TÂM
+    VIP lúc 07h/16h, để tách hẳn khối báo cáo khỏi coin phía trên); các tin khác giữ như cũ."""
     tag = (tag or (message.splitlines()[0] if message else ''))[:40]
-    now = datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n[{now}] 📨 Bắt đầu phát tin: [{tag}]")
+    if announce:
+        now = datetime.datetime.now(VN_TZ).strftime('%Y-%m-%d %H:%M:%S')   # giờ PHÁT thực (khớp timestamp _Tee ghi file)
+        print(f"\n[{now}] 📨 Bắt đầu phát tin: [{tag}]")
     total_sent = 0
     for token, label in TARGET_BOT_TOKENS:
         bot_id = token.split(':', 1)[0]
@@ -207,7 +228,8 @@ async def broadcast_to_bots(message, tag=None):
                 await asyncio.sleep(0.05)
             except Exception as e:
                 print(f"   ⚠️ Bot {label} → {name} lỗi: {e}")
-        print(f"   📤 [{tag}] Bot {label}: gửi {sent}/{len(subs)} người")
+        # KHÔNG in dòng tổng kết theo bot nữa — người gửi THÀNH CÔNG im lặng hoàn toàn;
+        # chỉ những người LỖI mới in (các dòng 🧹/⚠️ trong vòng lặp trên), rồi chốt "Tổng đã phát".
     print(f"   📤 [{tag}] Tổng đã phát: {total_sent} tin")
 
 # ==========================================
@@ -1227,7 +1249,7 @@ async def auto_send_report(missed_at=None):
         report = (f"⏰ **BÁO CÁO GỬI BÙ** — tool offline qua mốc {missed_at.strftime('%H:%M ngày %d/%m')}, "
                   f"gửi lại ngay khi khởi động.\n\n{report}")
     await client.send_message('me', report)
-    await broadcast_to_bots(report)
+    await broadcast_to_bots(report, announce=True)   # BẢN TIN ĐIỂM TÂM VIP 07h/16h → in dòng mở đầu
     set_state('last_report_sent', datetime.datetime.now(VN_TZ).isoformat())
 
 async def main():
