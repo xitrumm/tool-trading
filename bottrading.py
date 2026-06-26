@@ -1248,7 +1248,6 @@ async def auto_send_report(missed_at=None):
     if missed_at:
         report = (f"⏰ **BÁO CÁO GỬI BÙ** — tool offline qua mốc {missed_at.strftime('%H:%M ngày %d/%m')}, "
                   f"gửi lại ngay khi khởi động.\n\n{report}")
-    await client.send_message('me', report)
     await broadcast_to_bots(report, announce=True)   # BẢN TIN ĐIỂM TÂM VIP 07h/16h → in dòng mở đầu
     set_state('last_report_sent', datetime.datetime.now(VN_TZ).isoformat())
 
